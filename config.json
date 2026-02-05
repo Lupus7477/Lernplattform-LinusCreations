@@ -1,0 +1,9 @@
+{
+  "server_port": "8080",
+  "documents_path": "./dokumente",
+  "database_path": "lernplattform.db",
+  "ollama_url": "http://localhost:11434",
+  "default_model": "llama3.2",
+  "min_study_session_minutes": 30,
+  "max_questions_per_topic": 10
+}

@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>🎓 Lokale Lernplattform</title>
+    <link rel="stylesheet" href="/css/style.css">
+    <!-- Marked.js für Markdown-Rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Highlight.js für Code-Highlighting -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-brand">
+                <button class="mobile-menu-btn" onclick="toggleMobileMenu()" aria-label="Menü">☰</button>
+                <span class="logo">🎓</span>
+                <h1>Lernplattform</h1>
+            </div>
+            <div class="header-status">
+                <span id="llm-status" class="status-badge status-checking">
+                    🤖 Prüfe LLM...
+                </span>
+            </div>
+        </header>
+
+        <!-- Sidebar Overlay für Mobile -->
+        <div class="sidebar-overlay" onclick="closeMobileMenu()"></div>
+
+        <!-- Sidebar -->
+        <nav class="sidebar" id="sidebar">
+            <ul class="nav-list">
+                <li class="nav-item active" data-view="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span class="nav-text">Dashboard</span>
+                </li>
+                <li class="nav-item" data-view="documents">
+                    <span class="nav-icon">📚</span>
+                    <span class="nav-text">Dokumente</span>
+                </li>
+                <li class="nav-item" data-view="study-plan">
+                    <span class="nav-icon">📅</span>
+                    <span class="nav-text">Lernplan</span>
+                </li>
+                <li class="nav-item" data-view="learn">
+                    <span class="nav-icon">📖</span>
+                    <span class="nav-text">Lernen</span>
+                </li>
+                <li class="nav-item" data-view="quiz">
+                    <span class="nav-icon">❓</span>
+                    <span class="nav-text">Quiz</span>
+                </li>
+                <li class="nav-item" data-view="chat">
+                    <span class="nav-icon">💬</span>
+                    <span class="nav-text">Chat</span>
+                </li>
+                <li class="nav-item" data-view="glossary">
+                    <span class="nav-icon">📖</span>
+                    <span class="nav-text">Glossar</span>
+                </li>
+                <li class="nav-item" data-view="settings">
+                    <span class="nav-icon">⚙️</span>
+                    <span class="nav-text">Einstellungen</span>
+                </li>
+            </ul>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Dashboard View -->
+            <section id="view-dashboard" class="view active">
+                <h2>Dashboard</h2>
+                
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">📚</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-documents">0</span>
+                            <span class="stat-label">Dokumente</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📅</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-days">-</span>
+                            <span class="stat-label">Tage bis Prüfung</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">✅</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-progress">0%</span>
+                            <span class="stat-label">Fortschritt</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🎯</div>
+                        <div class="stat-info">
+                            <span class="stat-value" id="stat-score">-</span>
+                            <span class="stat-label">Durchschnitt</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="card">
+                        <h3>📈 Lernfortschritt</h3>
+                        <div class="progress-overview" id="progress-overview">
+                            <p class="placeholder">Starte einen Lernplan, um deinen Fortschritt zu sehen.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>📋 Nächste Schritte</h3>
+                        <div id="next-steps">
+                            <ol class="steps-list">
+                                <li id="step-1" class="step pending">
+                                    <span class="step-icon">1</span>
+                                    <span>Dokumente hochladen</span>
+                                </li>
+                                <li id="step-2" class="step pending">
+                                    <span class="step-icon">2</span>
+                                    <span>Prüfungstermin festlegen</span>
+                                </li>
+                                <li id="step-3" class="step pending">
+                                    <span class="step-icon">3</span>
+                                    <span>Lernplan erstellen</span>
+                                </li>
+                                <li id="step-4" class="step pending">
+                                    <span class="step-icon">4</span>
+                                    <span>Mit dem Lernen beginnen</span>
+                                </li>
+                            </ol>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Documents View -->
+            <section id="view-documents" class="view">
+                <h2>📚 Dokumente</h2>
+                
+                <div class="card">
+                    <h3>Dokumente hochladen</h3>
+                    <div class="upload-area" id="upload-area">
+                        <input type="file" id="file-input" accept=".pdf" multiple hidden>
+                        <div class="upload-content">
+                            <span class="upload-icon">📄</span>
+                            <p>PDF-Dateien hier ablegen oder klicken zum Auswählen</p>
+                        </div>
+                    </div>
+                    <button class="btn btn-secondary" id="scan-folder-btn">
+                        📁 Ordner scannen
+                    </button>
+                </div>
+
+                <div class="card">
+                    <h3>Hochgeladene Dokumente</h3>
+                    <div id="documents-list" class="documents-list">
+                        <p class="placeholder">Noch keine Dokumente hochgeladen.</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Study Plan View -->
+            <section id="view-study-plan" class="view">
+                <h2>📅 Lernplan</h2>
+                
+                <div id="no-plan" class="card">
+                    <h3>Neuen Lernplan erstellen</h3>
+                    <form id="create-plan-form">
+                        <div class="form-group">
+                            <label for="exam-date">Prüfungsdatum:</label>
+                            <input type="date" id="exam-date" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Dokumente auswählen:</label>
+                            <div id="plan-documents" class="checkbox-list">
+                                <p class="placeholder">Lade zuerst Dokumente hoch.</p>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary" id="create-plan-btn">
+                            🚀 Lernplan erstellen
+                        </button>
+                    </form>
+                </div>
+
+                <div id="active-plan" class="hidden">
+                    <div class="card plan-header">
+                        <h3 id="plan-name">Lernplan</h3>
+                        <div class="plan-meta">
+                            <span>📅 Prüfung: <strong id="plan-exam-date"></strong></span>
+                            <span>⏱️ Noch <strong id="plan-days-left"></strong> Tage</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="plan-progress-bar"></div>
+                        </div>
+                        <span class="progress-text"><span id="plan-progress">0</span>% abgeschlossen</span>
+                    </div>
+
+                    <div class="card">
+                        <h3>📋 Themenübersicht</h3>
+                        <div id="topics-list" class="topics-list"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Learn View -->
+            <section id="view-learn" class="view">
+                <h2>📖 Lernen</h2>
+                
+                <div id="learn-select-topic" class="card">
+                    <h3>Wähle ein Thema zum Lernen</h3>
+                    <div id="learn-topics" class="topics-grid"></div>
+                </div>
+
+                <div id="learn-content" class="hidden">
+                    <div class="card">
+                        <div class="learn-header">
+                            <button class="btn btn-secondary" id="back-to-topics">
+                                ← Zurück
+                            </button>
+                            <h3 id="learn-topic-title"></h3>
+                        </div>
+                        <div id="explanation-content" class="explanation markdown-body">
+                            <!-- Skeleton Loading -->
+                            <div class="skeleton-container">
+                                <div class="skeleton skeleton-title"></div>
+                                <div class="skeleton skeleton-text"></div>
+                                <div class="skeleton skeleton-text"></div>
+                                <div class="skeleton skeleton-text short"></div>
+                                <div class="skeleton skeleton-title" style="margin-top: 24px;"></div>
+                                <div class="skeleton skeleton-text"></div>
+                                <div class="skeleton skeleton-text"></div>
+                            </div>
+                        </div>
+                        <div class="learn-actions">
+                            <button class="btn btn-primary" id="start-quiz-btn">
+                                ❓ Zu den Fragen
+                            </button>
+                            <button class="btn btn-secondary" id="mark-complete-btn">
+                                ✅ Als gelernt markieren
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Quiz View -->
+            <section id="view-quiz" class="view">
+                <h2>❓ Quiz</h2>
+                
+                <div id="quiz-select" class="card">
+                    <h3>Thema auswählen</h3>
+                    <div id="quiz-topics" class="topics-grid"></div>
+                    <div class="form-group">
+                        <label for="difficulty-select">Schwierigkeitsgrad:</label>
+                        <select id="difficulty-select">
+                            <option value="1">1 - Einfach</option>
+                            <option value="2">2 - Grundlegend</option>
+                            <option value="3" selected>3 - Mittel</option>
+                            <option value="4">4 - Fortgeschritten</option>
+                            <option value="5">5 - Schwer</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div id="quiz-active" class="hidden">
+                    <div class="card quiz-card">
+                        <div class="quiz-header">
+                            <span class="quiz-progress">Frage <span id="quiz-current">1</span> von <span id="quiz-total">3</span></span>
+                            <span class="quiz-difficulty" id="quiz-difficulty">⭐⭐⭐</span>
+                        </div>
+                        
+                        <div class="question-content">
+                            <p id="question-text" class="question-text"></p>
+                            <div id="question-hints" class="hints hidden">
+                                <button class="btn btn-hint" id="show-hint-btn">💡 Hinweis anzeigen</button>
+                                <p id="hint-text" class="hint-text hidden"></p>
+                            </div>
+                        </div>
+
+                        <div class="answer-section">
+                            <textarea id="answer-input" placeholder="Deine Antwort..." rows="4"></textarea>
+                            <button class="btn btn-primary" id="submit-answer-btn">
+                                Antwort absenden
+                            </button>
+                        </div>
+
+                        <div id="feedback-section" class="feedback hidden">
+                            <div class="feedback-header">
+                                <span id="feedback-icon"></span>
+                                <span id="feedback-status"></span>
+                            </div>
+                            <p id="feedback-text"></p>
+                            <div id="expected-answer" class="expected-answer"></div>
+                            <button class="btn btn-primary" id="next-question-btn">
+                                Nächste Frage →
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="quiz-results" class="hidden">
+                    <div class="card results-card">
+                        <h3>🏆 Quiz abgeschlossen!</h3>
+                        <div class="results-stats">
+                            <div class="result-stat">
+                                <span class="result-value" id="result-correct">0</span>
+                                <span class="result-label">Richtig</span>
+                            </div>
+                            <div class="result-stat">
+                                <span class="result-value" id="result-total">0</span>
+                                <span class="result-label">Gesamt</span>
+                            </div>
+                            <div class="result-stat">
+                                <span class="result-value" id="result-percent">0%</span>
+                                <span class="result-label">Erfolgsrate</span>
+                            </div>
+                        </div>
+                        <div class="results-actions">
+                            <button class="btn btn-primary" id="retry-quiz-btn">
+                                🔄 Nochmal versuchen
+                            </button>
+                            <button class="btn btn-secondary" id="new-quiz-btn">
+                                📝 Neues Quiz
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Chat View -->
+            <section id="view-chat" class="view">
+                <h2>💬 Lern-Chat</h2>
+                
+                <div class="chat-container">
+                    <div class="chat-header">
+                        <select id="chat-topic-select">
+                            <option value="">Allgemein</option>
+                        </select>
+                    </div>
+                    
+                    <div id="chat-messages" class="chat-messages">
+                        <div class="chat-message assistant">
+                            <div class="message-content">
+                                👋 Hallo! Ich bin dein Lernassistent. Stelle mir Fragen zu deinen Lernmaterialien und ich helfe dir beim Verstehen.
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="chat-input-area">
+                        <textarea id="chat-input" placeholder="Stelle eine Frage..." rows="2"></textarea>
+                        <button class="btn btn-primary" id="send-chat-btn">
+                            Senden
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Settings View -->
+            <section id="view-settings" class="view">
+                <h2>⚙️ Einstellungen</h2>
+                
+                <div class="card">
+                    <h3>🎮 Quiz-Einstellungen</h3>
+                    <div class="form-group">
+                        <label for="questions-count">Anzahl Fragen pro Quiz:</label>
+                        <select id="questions-count">
+                            <option value="3">3 Fragen (Schnell)</option>
+                            <option value="5" selected>5 Fragen (Standard)</option>
+                            <option value="7">7 Fragen (Ausführlich)</option>
+                            <option value="10">10 Fragen (Intensiv)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="repeat-wrong-questions" checked>
+                            Falsche Fragen am Ende wiederholen
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="gamification-enabled" checked>
+                            🎮 Gamification aktivieren (Punkte, Streaks, Achievements)
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>🤖 LLM-Konfiguration</h3>
+                    <p id="current-model-info" class="model-info">Aktuell: Wird geladen...</p>
+                    <div class="form-group">
+                        <label for="model-select">Modell auswählen (Änderung wird sofort übernommen):</label>
+                        <select id="model-select">
+                            <option value="">Wird geladen...</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-secondary" id="refresh-models-btn">
+                        🔄 Modelle neu laden
+                    </button>
+                    <p class="hint-text" style="margin-top: 10px; font-size: 13px; color: #666;">
+                        💡 Tipp: Stelle sicher, dass Ollama läuft und das gewünschte Modell heruntergeladen ist.<br>
+                        Installiere neue Modelle mit: <code>ollama pull &lt;modellname&gt;</code>
+                    </p>
+                </div>
+
+                <div class="card">
+                    <h3>📁 Dokumenten-Ordner</h3>
+                    <div class="form-group">
+                        <label for="docs-path">Pfad zu den Lernmaterialien:</label>
+                        <input type="text" id="docs-path" placeholder="C:\Users\...">
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>ℹ️ Über diese Anwendung</h3>
+                    <p>
+                        Diese Lernplattform läuft <strong>vollständig lokal</strong> auf deinem Computer.
+                        Keine Daten werden an externe Server gesendet.
+                    </p>
+                    <p>
+                        <strong>Technologie:</strong> Go Backend, Ollama LLM, SQLite Datenbank
+                    </p>
+                </div>
+            </section>
+
+            <!-- Glossar View -->
+            <section id="view-glossary" class="view">
+                <h2>📖 Glossar</h2>
+                
+                <div class="card">
+                    <div class="glossary-header">
+                        <div class="search-box">
+                            <input type="text" id="glossary-search" placeholder="🔍 Begriff suchen...">
+                        </div>
+                        <button class="btn btn-primary" id="add-glossary-btn">
+                            ➕ Neuer Begriff
+                        </button>
+                    </div>
+                    
+                    <div class="glossary-filters">
+                        <button class="filter-btn active" data-filter="all">Alle</button>
+                        <button class="filter-btn" data-filter="definition">Definitionen</button>
+                        <button class="filter-btn" data-filter="formula">Formeln</button>
+                        <button class="filter-btn" data-filter="concept">Konzepte</button>
+                    </div>
+                </div>
+
+                <div id="glossary-list" class="glossary-list">
+                    <!-- Skeleton Loading -->
+                    <div class="glossary-skeleton">
+                        <div class="skeleton skeleton-title"></div>
+                        <div class="skeleton skeleton-text"></div>
+                        <div class="skeleton skeleton-text short"></div>
+                    </div>
+                    <div class="glossary-skeleton">
+                        <div class="skeleton skeleton-title"></div>
+                        <div class="skeleton skeleton-text"></div>
+                        <div class="skeleton skeleton-text short"></div>
+                    </div>
+                </div>
+
+                <!-- Add/Edit Glossary Modal -->
+                <div id="glossary-modal" class="modal hidden">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h3 id="modal-title">Neuer Glossar-Eintrag</h3>
+                            <button class="modal-close" id="close-modal">&times;</button>
+                        </div>
+                        <form id="glossary-form">
+                            <div class="form-group">
+                                <label for="glossary-term">Begriff *</label>
+                                <input type="text" id="glossary-term" required placeholder="z.B. Supply Chain Management">
+                            </div>
+                            <div class="form-group">
+                                <label for="glossary-category">Kategorie</label>
+                                <select id="glossary-category">
+                                    <option value="definition">Definition</option>
+                                    <option value="formula">Formel</option>
+                                    <option value="concept">Konzept</option>
+                                    <option value="abbreviation">Abkürzung</option>
+                                    <option value="other">Sonstiges</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="glossary-definition">Beschreibung *</label>
+                                <textarea id="glossary-definition" rows="4" required placeholder="Kurze, prägnante Erklärung..."></textarea>
+                            </div>
+                            <div class="form-group">
+                                <label for="glossary-details">Weitere Details (optional)</label>
+                                <textarea id="glossary-details" rows="3" placeholder="Beispiele, Formeln, Zusammenhänge..."></textarea>
+                            </div>
+                            <div class="form-group">
+                                <label for="glossary-related">Verwandte Begriffe (kommagetrennt)</label>
+                                <input type="text" id="glossary-related" placeholder="z.B. Logistik, Beschaffung">
+                            </div>
+                            <div class="modal-actions">
+                                <button type="button" class="btn btn-secondary" id="cancel-glossary">Abbrechen</button>
+                                <button type="submit" class="btn btn-primary">💾 Speichern</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/js/app.js"></script>
+</body>
+</html>
