@@ -681,6 +681,187 @@ textarea:focus {
     margin-bottom: 16px;
 }
 
+/* === Content Tabs === */
+.content-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 20px;
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 0;
+}
+
+.content-tab {
+    padding: 12px 20px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+}
+
+.content-tab:hover {
+    color: var(--primary);
+    background: #f5f3ff;
+}
+
+.content-tab.active {
+    color: var(--primary);
+    border-bottom-color: var(--primary);
+    background: transparent;
+}
+
+.tab-content {
+    animation: fadeIn 0.2s ease;
+}
+
+.tab-content.hidden {
+    display: none;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* === Überblick/Summary View === */
+.summary-view {
+    padding: 8px 0;
+}
+
+.summary-card {
+    background: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%);
+    border: 1px solid #ddd6fe;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+}
+
+.summary-card h4 {
+    margin: 0 0 12px 0;
+    color: #5b21b6;
+    font-size: 1.1em;
+}
+
+.summary-card ul {
+    margin: 0;
+    padding-left: 20px;
+}
+
+.summary-card li {
+    margin: 8px 0;
+    color: #4c1d95;
+}
+
+.key-points {
+    display: grid;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.key-point {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 16px;
+    background: white;
+    border-radius: 8px;
+    border-left: 4px solid var(--primary);
+}
+
+.key-point-icon {
+    font-size: 20px;
+    flex-shrink: 0;
+}
+
+.key-point-text {
+    font-size: 15px;
+    line-height: 1.5;
+}
+
+/* === Begriffe/Terms Grid === */
+.terms-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+    padding: 8px 0;
+}
+
+.term-card {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    transition: all 0.2s ease;
+}
+
+.term-card:hover {
+    border-color: var(--primary);
+    box-shadow: 0 4px 12px rgba(79, 70, 229, 0.1);
+}
+
+.term-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.term-card-name {
+    font-weight: 600;
+    color: var(--primary);
+    font-size: 1.05em;
+}
+
+.term-card-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    background: #eef2ff;
+    color: var(--primary);
+    border-radius: 12px;
+}
+
+.term-card-definition {
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+.term-card-actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+}
+
+.term-card-btn {
+    font-size: 12px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    background: white;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.term-card-btn:hover {
+    background: #f9fafb;
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+.term-card-btn.primary {
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+}
+
+.term-card-btn.primary:hover {
+    background: var(--primary-hover);
+}
+
 .learn-actions {
     display: flex;
     gap: 12px;

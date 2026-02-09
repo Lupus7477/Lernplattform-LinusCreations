@@ -5,11 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>🎓 Lokale Lernplattform</title>
     <link rel="stylesheet" href="/css/style.css">
-    <!-- Marked.js für Markdown-Rendering -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Marked.js für Markdown-Rendering (spezifische Version für Stabilität) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"></script>
     <!-- Highlight.js für Code-Highlighting -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js"></script>
 </head>
 <body>
     <div id="app">
@@ -225,18 +225,53 @@
                             </button>
                             <h3 id="learn-topic-title"></h3>
                         </div>
-                        <div id="explanation-content" class="explanation markdown-body">
-                            <!-- Skeleton Loading -->
-                            <div class="skeleton-container">
-                                <div class="skeleton skeleton-title"></div>
-                                <div class="skeleton skeleton-text"></div>
-                                <div class="skeleton skeleton-text"></div>
-                                <div class="skeleton skeleton-text short"></div>
-                                <div class="skeleton skeleton-title" style="margin-top: 24px;"></div>
-                                <div class="skeleton skeleton-text"></div>
-                                <div class="skeleton skeleton-text"></div>
+                        
+                        <!-- Content Tabs -->
+                        <div class="content-tabs">
+                            <button class="content-tab active" data-tab="explanation" onclick="switchContentTab('explanation')">
+                                📚 Erklärung
+                            </button>
+                            <button class="content-tab" data-tab="summary" onclick="switchContentTab('summary')">
+                                📋 Überblick
+                            </button>
+                            <button class="content-tab" data-tab="terms" onclick="switchContentTab('terms')">
+                                📖 Begriffe
+                            </button>
+                        </div>
+                        
+                        <!-- Tab: Erklärung -->
+                        <div id="tab-explanation" class="tab-content active">
+                            <div id="explanation-content" class="explanation markdown-body">
+                                <!-- Skeleton Loading -->
+                                <div class="skeleton-container">
+                                    <div class="skeleton skeleton-title"></div>
+                                    <div class="skeleton skeleton-text"></div>
+                                    <div class="skeleton skeleton-text"></div>
+                                    <div class="skeleton skeleton-text short"></div>
+                                    <div class="skeleton skeleton-title" style="margin-top: 24px;"></div>
+                                    <div class="skeleton skeleton-text"></div>
+                                    <div class="skeleton skeleton-text"></div>
+                                </div>
                             </div>
                         </div>
+                        
+                        <!-- Tab: Überblick -->
+                        <div id="tab-summary" class="tab-content hidden">
+                            <div id="summary-content" class="summary-view">
+                                <div class="skeleton-container">
+                                    <div class="skeleton skeleton-text"></div>
+                                    <div class="skeleton skeleton-text"></div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Tab: Begriffe -->
+                        <div id="tab-terms" class="tab-content hidden">
+                            <div id="terms-content" class="terms-grid">
+                                <p class="placeholder">Begriffe werden aus der Erklärung extrahiert...</p>
+                            </div>
+                        </div>
+                        
                         <div class="learn-actions">
                             <button class="btn btn-primary" id="start-quiz-btn">
                                 ❓ Zu den Fragen

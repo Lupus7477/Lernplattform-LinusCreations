@@ -465,6 +465,16 @@ async function showTopicContent() {
 
     document.getElementById('learn-topic-title').textContent = state.currentTopic.name;
     
+    // Reset tabs to first tab
+    document.querySelectorAll('.content-tab').forEach(tab => tab.classList.remove('active'));
+    document.querySelector('.content-tab[data-tab="explanation"]').classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+    document.getElementById('tab-explanation').classList.remove('hidden');
+    
+    // Reset state for tabs
+    currentExplanation = '';
+    extractedTerms = [];
+    
     const container = document.getElementById('explanation-content');
     // Zeige Skeleton Loading
     container.innerHTML = `
@@ -482,6 +492,10 @@ async function showTopicContent() {
 
     try {
         const explanation = await api(`/topics/${state.currentTopic.id}/explain`);
+        
+        // Speichere Erklärung für andere Tabs
+        currentExplanation = explanation.content;
+        
         container.innerHTML = `<div class="markdown-body">${formatExplanation(explanation.content)}</div>`;
         
         // Highlight code blocks
@@ -649,34 +663,193 @@ function closeTermTooltip() {
 
 function formatExplanation(content) {
     // Markdown mit marked.js rendern
-    if (typeof marked !== 'undefined') {
-        marked.setOptions({
-            highlight: function(code, lang) {
-                if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
-                    return hljs.highlight(code, { language: lang }).value;
-                }
-                return code;
-            },
-            breaks: true,
-            gfm: true
-        });
-        return marked.parse(content);
+    if (typeof marked !== 'undefined' && marked.parse) {
+        try {
+            // Konfiguriere marked
+            marked.setOptions({
+                breaks: true,
+                gfm: true,
+                headerIds: false,
+                mangle: false
+            });
+            
+            const html = marked.parse(content);
+            console.log('[Markdown] Erfolgreich gerendert');
+            return html;
+        } catch (e) {
+            console.error('[Markdown] Fehler beim Parsen:', e);
+        }
+    } else {
+        console.warn('[Markdown] marked.js nicht verfügbar, nutze Fallback');
     }
     
-    // Fallback: Simple markdown-like formatting
+    // Verbesserter Fallback: Manuelles Markdown-Rendering
     return content
-        .replace(/\n\n/g, '</p><p>')
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+        // Überschriften
+        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^#### (.+)$/gm, '<h4>$1</h4>')
+        // Blockquotes
+        .replace(/^> (.+)$/gm, '<blockquote><p>$1</p></blockquote>')
+        // Fett und Kursiv
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        // Code
         .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/\n- /g, '<br>• ')
-        .replace(/^/, '<p>')
-        .replace(/$/, '</p>');
+        // Listen
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+        // Absätze
+        .replace(/\n\n/g, '</p><p>')
+        .replace(/^(?!<[hublop])/, '<p>')
+        .replace(/(?<![>])$/, '</p>')
+        // Horizontale Linie
+        .replace(/^---$/gm, '<hr>');
 }
+
+// === Content Tabs ===
+let currentExplanation = '';
+let extractedTerms = [];
+
+function switchContentTab(tabName) {
+    // Update Tab Buttons
+    document.querySelectorAll('.content-tab').forEach(tab => {
+        tab.classList.remove('active');
+    });
+    document.querySelector(`.content-tab[data-tab="${tabName}"]`).classList.add('active');
+    
+    // Update Tab Content
+    document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.add('hidden');
+    });
+    document.getElementById(`tab-${tabName}`).classList.remove('hidden');
+    
+    // Load content on demand
+    if (tabName === 'summary' && currentExplanation) {
+        generateSummary();
+    } else if (tabName === 'terms' && currentExplanation) {
+        displayExtractedTerms();
+    }
+}
+
+async function generateSummary() {
+    const container = document.getElementById('summary-content');
+    
+    // Zeige Loading
+    container.innerHTML = `
+        <div class="skeleton-container">
+            <div class="skeleton skeleton-text"></div>
+            <div class="skeleton skeleton-text"></div>
+            <div class="skeleton skeleton-text short"></div>
+        </div>
+    `;
+    
+    try {
+        // Extrahiere Kernpunkte aus der Erklärung
+        const response = await api('/chat', {
+            method: 'POST',
+            body: JSON.stringify({
+                message: `Extrahiere aus diesem Lerninhalt die 5 wichtigsten Kernpunkte als kurze Stichpunkte:
+
+${currentExplanation.substring(0, 3000)}
+
+Antworte NUR mit den 5 Punkten, jeweils beginnend mit einem Emoji (💡, 📌, ⚡, 🎯, 🔑). Maximal 1 Satz pro Punkt.`,
+                session_id: 'summary'
+            })
+        });
+        
+        const points = response.response.split('\n').filter(line => line.trim());
+        
+        container.innerHTML = `
+            <div class="summary-card">
+                <h4>🎯 Kernpunkte für "${state.currentTopic?.name || 'Dieses Thema'}"</h4>
+                <div class="key-points">
+                    ${points.map(point => `
+                        <div class="key-point">
+                            <span class="key-point-icon">${point.charAt(0)}</span>
+                            <span class="key-point-text">${point.substring(1).trim()}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        `;
+    } catch (error) {
+        container.innerHTML = `<p class="placeholder">Fehler beim Erstellen des Überblicks: ${error.message}</p>`;
+    }
+}
+
+function displayExtractedTerms() {
+    const container = document.getElementById('terms-content');
+    
+    if (extractedTerms.length === 0) {
+        // Extrahiere Begriffe aus der Erklärung (alles was fett ist)
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = formatExplanation(currentExplanation);
+        const strongElements = tempDiv.querySelectorAll('strong');
+        
+        strongElements.forEach(el => {
+            const term = el.textContent.trim();
+            if (term && term.length > 2 && !extractedTerms.find(t => t.name === term)) {
+                extractedTerms.push({ name: term, definition: '' });
+            }
+        });
+    }
+    
+    if (extractedTerms.length === 0) {
+        container.innerHTML = '<p class="placeholder">Keine Fachbegriffe in dieser Erklärung gefunden.</p>';
+        return;
+    }
+    
+    container.innerHTML = extractedTerms.map((term, index) => `
+        <div class="term-card" data-term="${term.name}">
+            <div class="term-card-header">
+                <span class="term-card-name">${term.name}</span>
+                <span class="term-card-badge">${index + 1} / ${extractedTerms.length}</span>
+            </div>
+            <div class="term-card-definition" id="term-def-${index}">
+                ${term.definition || '<span style="color: #9ca3af;">Klicke auf "Erklären" für eine Definition</span>'}
+            </div>
+            <div class="term-card-actions">
+                <button class="term-card-btn" onclick="explainTerm('${term.name.replace(/'/g, "\\'")}', ${index})">
+                    💡 Erklären
+                </button>
+                <button class="term-card-btn primary" onclick="addTermToGlossary('${term.name.replace(/'/g, "\\'")}')">
+                    📖 Merken
+                </button>
+            </div>
+        </div>
+    `).join('');
+}
+
+async function explainTerm(termName, index) {
+    const defContainer = document.getElementById(`term-def-${index}`);
+    defContainer.innerHTML = '<span style="color: #6b7280;">Lade Definition...</span>';
+    
+    try {
+        const response = await api('/chat', {
+            method: 'POST',
+            body: JSON.stringify({
+                message: `Erkläre den Begriff "${termName}" in maximal 2 kurzen, einfachen Sätzen.`,
+                session_id: 'term_explain'
+            })
+        });
+        
+        defContainer.innerHTML = response.response;
+        extractedTerms[index].definition = response.response;
+    } catch (error) {
+        defContainer.innerHTML = '<span style="color: #ef4444;">Fehler beim Laden</span>';
+    }
+}
+
+// Make switchContentTab and explainTerm available globally
+window.switchContentTab = switchContentTab;
+window.explainTerm = explainTerm;
 
 function initLearnButtons() {
     document.getElementById('back-to-topics').addEventListener('click', () => {
         state.currentTopic = null;
+        currentExplanation = '';
+        extractedTerms = [];
         showTopicSelection();
     });
 
