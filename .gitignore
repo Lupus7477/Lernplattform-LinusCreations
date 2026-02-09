@@ -1,0 +1,78 @@
+# ====================================
+# Lernplattform .gitignore
+# ====================================
+
+# === Binaries ===
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.bin
+
+# === Go Build Output ===
+/cmd/server/server
+/lernplattform
+__debug_bin*
+
+# === Database (WICHTIG!) ===
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+lernplattform.db
+
+# === IDE / Editor ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-*
+*~
+
+# === OS Files ===
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# === User Data / Uploads ===
+/dokumente/
+uploads/
+
+# === Logs ===
+*.log
+logs/
+
+# === Test Coverage ===
+coverage.out
+coverage.html
+*.coverprofile
+
+# === Dependencies ===
+/vendor/
+node_modules/
+
+# === Environment / Secrets ===
+.env
+.env.*
+*.env
+config.local.*
+secrets.*
+
+# === Temporary Files ===
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# === Build Artifacts ===
+dist/
+build/
+out/
