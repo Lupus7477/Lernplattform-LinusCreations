@@ -1,11 +1,87 @@
 package api
 
 import (
+	"compress/gzip"
+	"io"
 	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 )
+
+// gzipResponseWriter wraps http.ResponseWriter für Komprimierung
+type gzipResponseWriter struct {
+	io.Writer
+	http.ResponseWriter
+}
+
+func (w gzipResponseWriter) Write(b []byte) (int, error) {
+	return w.Writer.Write(b)
+}
+
+// gzipWriterPool für Performance
+var gzipWriterPool = sync.Pool{
+	New: func() interface{} {
+		return gzip.NewWriter(nil)
+	},
+}
+
+// compressionMiddleware komprimiert Responses
+func compressionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Prüfe ob Client gzip unterstützt
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Hole gzip Writer aus Pool
+		gz := gzipWriterPool.Get().(*gzip.Writer)
+		gz.Reset(w)
+		defer func() {
+			gz.Close()
+			gzipWriterPool.Put(gz)
+		}()
+
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Del("Content-Length")
+
+		next.ServeHTTP(gzipResponseWriter{Writer: gz, ResponseWriter: w}, r)
+	})
+}
+
+// cacheMiddleware setzt Cache-Header für statische Assets
+func cacheMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		// Service Worker nie cachen
+		if strings.HasSuffix(path, "sw.js") {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Statische Assets lange cachen
+		if strings.HasSuffix(path, ".css") ||
+			strings.HasSuffix(path, ".js") ||
+			strings.HasSuffix(path, ".png") ||
+			strings.HasSuffix(path, ".svg") ||
+			strings.HasSuffix(path, ".woff2") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else if strings.HasSuffix(path, ".html") || path == "/" {
+			// HTML kurz cachen für Updates
+			w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
+		} else if strings.HasPrefix(path, "/api/") {
+			// API Responses nicht cachen (außer explizit)
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
 
 // NewRouter erstellt den HTTP-Router mit allen Endpoints
 func NewRouter(h *Handler) http.Handler {
@@ -75,5 +151,6 @@ func NewRouter(h *Handler) http.Handler {
 		AllowCredentials: true,
 	})
 
-	return c.Handler(r)
+	// Middleware Chain: CORS -> Cache -> Compression -> Router
+	return c.Handler(cacheMiddleware(compressionMiddleware(r)))
 }

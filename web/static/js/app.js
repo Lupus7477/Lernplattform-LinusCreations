@@ -1,8 +1,77 @@
-// === API Client ===
+// === Offline Detection & PWA ===
+let isOnline = navigator.onLine;
+
+window.addEventListener('online', () => {
+    isOnline = true;
+    updateOnlineStatus();
+    console.log('[PWA] Wieder online');
+});
+
+window.addEventListener('offline', () => {
+    isOnline = false;
+    updateOnlineStatus();
+    console.log('[PWA] Offline-Modus');
+});
+
+function updateOnlineStatus() {
+    const statusBadge = document.getElementById('llm-status');
+    if (!isOnline) {
+        statusBadge.textContent = '📴 Offline';
+        statusBadge.className = 'status-badge status-offline';
+    }
+}
+
+// === Local Storage Cache für schnelleres Laden ===
+const cache = {
+    get(key) {
+        try {
+            const item = localStorage.getItem(`cache_${key}`);
+            if (!item) return null;
+            const { data, expires } = JSON.parse(item);
+            if (expires && Date.now() > expires) {
+                localStorage.removeItem(`cache_${key}`);
+                return null;
+            }
+            return data;
+        } catch { return null; }
+    },
+    set(key, data, ttlMinutes = 60) {
+        try {
+            const item = {
+                data,
+                expires: Date.now() + (ttlMinutes * 60 * 1000)
+            };
+            localStorage.setItem(`cache_${key}`, JSON.stringify(item));
+        } catch (e) {
+            console.warn('[Cache] Storage voll:', e);
+        }
+    },
+    clear() {
+        Object.keys(localStorage)
+            .filter(k => k.startsWith('cache_'))
+            .forEach(k => localStorage.removeItem(k));
+    }
+};
+
+// === API Client mit Caching ===
 const API_BASE = '/api/v1';
 
 async function api(endpoint, options = {}) {
     const url = `${API_BASE}${endpoint}`;
+    const cacheKey = `${options.method || 'GET'}_${endpoint}`;
+    
+    // Nur GET-Requests cachen
+    const isCacheable = !options.method || options.method === 'GET';
+    
+    // Prüfe Cache bei GET-Requests
+    if (isCacheable && isOnline === false) {
+        const cached = cache.get(cacheKey);
+        if (cached) {
+            console.log('[API] Aus Cache:', endpoint);
+            return cached;
+        }
+    }
+
     const config = {
         headers: {
             'Content-Type': 'application/json',
@@ -19,8 +88,21 @@ async function api(endpoint, options = {}) {
             throw new Error(data.error || 'API-Fehler');
         }
         
+        // Cache erfolgreiche GET-Responses
+        if (isCacheable) {
+            cache.set(cacheKey, data, 30); // 30 Minuten
+        }
+        
         return data;
     } catch (error) {
+        // Fallback auf Cache wenn offline
+        if (isCacheable) {
+            const cached = cache.get(cacheKey);
+            if (cached) {
+                console.log('[API] Fallback auf Cache:', endpoint);
+                return cached;
+            }
+        }
         console.error('API Error:', error);
         throw error;
     }

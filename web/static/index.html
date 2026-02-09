@@ -3,13 +3,31 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="description" content="Lokale KI-gestützte Lernplattform mit Ollama">
+    <meta name="theme-color" content="#4f46e5">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Lernplattform">
+    
     <title>🎓 Lokale Lernplattform</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg">
+    <link rel="apple-touch-icon" href="/icons/icon.svg">
+    
+    <!-- Preload wichtige Assets -->
+    <link rel="preload" href="/css/style.css" as="style">
+    <link rel="preload" href="/js/app.js" as="script">
+    <link rel="preload" href="/js/marked.min.js" as="script">
+    
+    <!-- Styles -->
     <link rel="stylesheet" href="/css/style.css">
-    <!-- Marked.js für Markdown-Rendering (spezifische Version für Stabilität) -->
-    <script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"></script>
-    <!-- Highlight.js für Code-Highlighting -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js"></script>
+    <link rel="stylesheet" href="/css/github.min.css">
+    
+    <!-- Lokal gehostete Libraries (Offline-fähig) -->
+    <script src="/js/marked.min.js"></script>
+    <script src="/js/highlight.min.js"></script>
 </head>
 <body>
     <div id="app">
@@ -545,5 +563,16 @@
     </div>
 
     <script src="/js/app.js"></script>
+    
+    <!-- Service Worker Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js')
+                    .then(reg => console.log('[PWA] Service Worker registriert:', reg.scope))
+                    .catch(err => console.log('[PWA] Service Worker Fehler:', err));
+            });
+        }
+    </script>
 </body>
 </html>
