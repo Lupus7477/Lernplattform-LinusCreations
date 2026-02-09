@@ -356,17 +356,20 @@ Antworte NUR im JSON-Format:
    - NIEMALS "Siehe Kapitel X", "Seite Y", "im Skript", "Abschnitt Z"
    - NIEMALS Verweise auf Dokumente/Materialien
    - Die TATSÄCHLICHE Definition/Erklärung ausschreiben!
-   - FALSCH: "...werden in Kapitel 1.3 des Skripts diskutiert"
-   - RICHTIG: "Beschaffung befasst sich mit dem Einkauf von Gütern..."
+   - FALSCH: "...wird in Kapitel 1.3 des Skripts diskutiert"
+   - RICHTIG: Die konkrete Antwort ausformulieren (z.B. "Eine Variable ist ein benannter Speicherplatz für Daten")
 
 3. **hints (SEHR WICHTIG!):**
    - NIEMALS "Schauen Sie auf Seite X" oder "Siehe Kapitel Y"
    - NIEMALS "Im Material steht..." oder "Das Skript erwähnt..."
    - IMMER inhaltliche Denkhilfen mit konkreten Begriffen!
-   - GUTE Beispiele:
-     * "Denke an die drei Bereiche: Einkauf, Herstellung, Transport"
-     * "Es gibt wirtschaftliche, technische, soziale und ökologische Aspekte"
-     * "Überlege: Input -> Transformation -> Output"
+   - Passe die Hinweise an das FACH an (Mathe, Informatik, Sprachen, Wirtschaft, Naturwissenschaften...)
+   - GUTE Beispiele je nach Fach:
+     * Mathe: "Welche Formel verbindet Radius und Fläche?", "Denke an: a² + b² = ..."
+     * Informatik: "Welche Datenstruktur nutzt FIFO?", "Denke an: Schleife, Bedingung, Rekursion"
+     * Sprachen: "Welche Zeitform drückt Abgeschlossenheit aus?", "Subjekt-Verb-Objekt..."
+     * Wirtschaft: "Denke an: Angebot und Nachfrage", "Input -> Transformation -> Output"
+     * Naturwissenschaften: "Welches Gesetz beschreibt Kraft und Masse?", "Denke an die Aggregatzustände"
    - SCHLECHTE Beispiele (ABSOLUT VERBOTEN!):
      * "Siehe Seite 5"
      * "Kapitel 2.3 behandelt das"
@@ -429,11 +432,13 @@ Antworte im JSON-Format:
    - Bei FALSE: "💡 [Was konkret fehlt] - Die richtige Antwort ist: [Antwort]"
    - KURZ halten! Max 2 Sätze.
 
-BEISPIELE:
-- "Unternehmen, Politik, Gesellschaft" -> TRUE (Kernpunkte genannt)
-- "Die drei Ebenen sind Güter, Finanzen und Disposition" -> TRUE
-- "keine" oder "weiß nicht" -> FALSE
-- "Wirtschaft" (zu vage) -> FALSE`, question.Question, question.ExpectedAnswer, userAnswer)
+BEISPIELE für verschiedene Fächer:
+- Kernpunkte genannt (auch mit Tippfehlern) -> TRUE
+- Synonyme verwendet ("PC" statt "Computer") -> TRUE  
+- Formel richtig aber andere Variablennamen -> TRUE
+- "keine", "weiß nicht", "k.A." -> FALSE
+- Nur ein Wort ohne Kontext (zu vage) -> FALSE
+- Komplett falsches Thema -> FALSE`, question.Question, question.ExpectedAnswer, userAnswer)
 
 	resp, err := t.provider.Generate(ctx, prompt, &GenerateOptions{
 		Temperature: 0.1,
