@@ -13,9 +13,9 @@ import (
 
 // Tutor verwaltet die didaktische KI-Logik
 type Tutor struct {
-	provider   Provider
-	agentPool  *AgentPool
-	useAgents  bool
+	provider  Provider
+	agentPool *AgentPool
+	useAgents bool
 }
 
 // NewTutor erstellt einen neuen Tutor
@@ -34,9 +34,9 @@ func NewTutorWithAgents(provider Provider, fastModel string, numAgents int) *Tut
 		TimeoutPerTask: 2 * time.Minute,
 	}
 	return &Tutor{
-		provider:   provider,
-		agentPool:  NewAgentPool(provider, config),
-		useAgents:  true,
+		provider:  provider,
+		agentPool: NewAgentPool(provider, config),
+		useAgents: true,
 	}
 }
 
@@ -59,11 +59,11 @@ func (t *Tutor) AnalyzeDocuments(ctx context.Context, documents []models.Documen
 	if t.useAgents && t.agentPool != nil {
 		return t.agentPool.AnalyzeDocumentsParallel(ctx, documents)
 	}
-	
+
 	// Fallback: Sequentielle Analyse
 	log.Println("   [Tutor] Sequentieller Modus (ohne Agenten)")
 	log.Println("   [Tutor] Bereite Dokumenteninhalt vor...")
-	
+
 	// Dedupliziere Dokumente nach Name
 	seen := make(map[string]bool)
 	var uniqueDocs []models.Document
@@ -74,7 +74,7 @@ func (t *Tutor) AnalyzeDocuments(ctx context.Context, documents []models.Documen
 		}
 	}
 	log.Printf("   [Tutor] %d eindeutige Dokumente (von %d)", len(uniqueDocs), len(documents))
-	
+
 	// Priorisiere Hauptskripte (keine Klausuren/Übungsblätter für Analyse)
 	var mainDocs []models.Document
 	var otherDocs []models.Document
@@ -86,14 +86,14 @@ func (t *Tutor) AnalyzeDocuments(ctx context.Context, documents []models.Documen
 			mainDocs = append(mainDocs, doc)
 		}
 	}
-	
+
 	// Verwende hauptsächlich die Skripte für die Themenanalyse
 	docsToAnalyze := mainDocs
 	if len(docsToAnalyze) == 0 {
 		docsToAnalyze = uniqueDocs
 	}
 	log.Printf("   [Tutor] Analysiere %d Hauptdokumente", len(docsToAnalyze))
-	
+
 	// Kombiniere Dokumenteninhalte mit striktem Limit
 	var allContent strings.Builder
 	maxTotalChars := 30000 // Max 30k Zeichen gesamt für den Prompt
@@ -104,7 +104,7 @@ func (t *Tutor) AnalyzeDocuments(ctx context.Context, documents []models.Documen
 	if charsPerDoc < 2000 {
 		charsPerDoc = 2000
 	}
-	
+
 	for _, doc := range docsToAnalyze {
 		allContent.WriteString(fmt.Sprintf("\n=== Dokument: %s ===\n", doc.Name))
 		content := doc.Content
@@ -113,7 +113,7 @@ func (t *Tutor) AnalyzeDocuments(ctx context.Context, documents []models.Documen
 			content = content[:charsPerDoc] + "\n[... gekürzt ...]"
 		}
 		allContent.WriteString(content)
-		
+
 		if allContent.Len() > maxTotalChars {
 			log.Printf("   [Tutor] Maximale Prompt-Größe erreicht, stoppe bei %d Dokumenten", len(docsToAnalyze))
 			break
@@ -313,7 +313,7 @@ func (t *Tutor) GenerateQuestions(ctx context.Context, topic *models.Topic, docu
 	if count <= 0 {
 		count = 3 // Standard: 3 Fragen
 	}
-	
+
 	difficultyDesc := map[int]string{
 		1: "einfache Verständnisfragen",
 		2: "grundlegende Wissensfragen",
@@ -342,28 +342,40 @@ Antworte NUR im JSON-Format:
   ]
 }
 
-**WICHTIGE REGELN:**
+**KRITISCHE REGELN FÜR FRAGEN:**
 
-1. **expected_answer:**
-   - DIREKTE inhaltliche Antwort
-   - NIEMALS "Siehe Kapitel X" oder "Seite Y"
-   - Die tatsächliche Definition/Erklärung
+1. **EINE Frage = EIN Aspekt:**
+   - FALSCH: "Was ist X und welche Arten gibt es?" (= 2 Fragen!)
+   - RICHTIG: "Was ist X?" ODER "Welche Arten von X gibt es?"
+   - NIEMALS "und" verwenden um zwei Fragen zu verbinden!
+   - NIEMALS "Definieren Sie X und nennen Sie Y"
+   - Jede Frage fragt NUR EINEN konkreten Punkt ab
 
-2. **hints (SEHR WICHTIG!):**
+2. **expected_answer:**
+   - DIREKTE inhaltliche Antwort mit konkreten Fakten
+   - NIEMALS "Siehe Kapitel X", "Seite Y", "im Skript", "Abschnitt Z"
+   - NIEMALS Verweise auf Dokumente/Materialien
+   - Die TATSÄCHLICHE Definition/Erklärung ausschreiben!
+   - FALSCH: "...werden in Kapitel 1.3 des Skripts diskutiert"
+   - RICHTIG: "Beschaffung befasst sich mit dem Einkauf von Gütern..."
+
+3. **hints (SEHR WICHTIG!):**
    - NIEMALS "Schauen Sie auf Seite X" oder "Siehe Kapitel Y"
-   - IMMER inhaltliche Denkhilfen!
+   - NIEMALS "Im Material steht..." oder "Das Skript erwähnt..."
+   - IMMER inhaltliche Denkhilfen mit konkreten Begriffen!
    - GUTE Beispiele:
      * "Denke an die drei Bereiche: Einkauf, Herstellung, Transport"
-     * "Welche Gruppen beeinflussen Nachhaltigkeit? Firmen, Staat, Menschen..."
-     * "Überlege: Was kommt rein, was passiert damit, was kommt raus?"
-   - SCHLECHTE Beispiele (VERBOTEN!):
+     * "Es gibt wirtschaftliche, technische, soziale und ökologische Aspekte"
+     * "Überlege: Input -> Transformation -> Output"
+   - SCHLECHTE Beispiele (ABSOLUT VERBOTEN!):
      * "Siehe Seite 5"
      * "Kapitel 2.3 behandelt das"
-     * "Im Skript steht..."`, difficultyDesc[difficulty], topic.Name, limitContent(documentContent, 6000), count, difficulty, difficultyDesc[difficulty])
+     * "Im Skript wird das in Abschnitt 1.3 erklärt"
+     * "Schauen Sie in den Lernmaterialien nach"`, difficultyDesc[difficulty], topic.Name, limitContent(documentContent, 6000), count, difficulty, difficultyDesc[difficulty])
 
 	resp, err := t.provider.Generate(ctx, prompt, &GenerateOptions{
 		Temperature: 0.4,
-		System:      "Du bist ein Prüfer. Fragen prüfen WISSEN, nicht wo es steht. Hinweise sind INHALTLICHE Denkhilfen, NIEMALS Seitenverweise. JSON-Format.",
+		System:      "Du erstellst Prüfungsfragen. JEDE Frage fragt NUR EINEN Aspekt ab - niemals 'X und Y'. Hinweise und Antworten sind IMMER inhaltlich konkret, NIEMALS mit Seitenverweisen oder Kapitelangaben. JSON-Format.",
 	})
 	if err != nil {
 		return nil, err
@@ -383,7 +395,7 @@ func (t *Tutor) EvaluateAnswer(ctx context.Context, question *models.Question, u
 	if len(strings.TrimSpace(userAnswer)) < 3 {
 		return false, "💡 Du hast keine richtige Antwort eingegeben. Versuch es nochmal!", nil
 	}
-	
+
 	prompt := fmt.Sprintf(`Bewerte diese Antwort FAIR aber nicht zu großzügig:
 
 Frage: %s
