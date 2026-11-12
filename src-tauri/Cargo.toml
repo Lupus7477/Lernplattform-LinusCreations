@@ -1,0 +1,40 @@
+[package]
+name = "lernplattform"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+name = "lernplattform_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.42", features = ["bundled"] }
+ureq = "3"
+llama-cpp-2 = { version = "0.1.161", default-features = false, features = ["common"] }
+
+# GPU-Backend je Plattform (Features werden pro Ziel zusammengeführt)
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+llama-cpp-2 = { version = "0.1.161", default-features = false, features = ["common", "vulkan", "openmp"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+llama-cpp-2 = { version = "0.1.161", default-features = false, features = ["common", "metal"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+llama-cpp-2 = { version = "0.1.161", default-features = false, features = ["common", "android-shared-stdcxx"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Sampling-Schleife läuft pro Token über ~250k Kandidaten: auch im Entwicklungs-Build optimieren
+[profile.dev.package.llama-cpp-2]
+opt-level = 3
+[profile.dev.package.lernplattform]
+opt-level = 2

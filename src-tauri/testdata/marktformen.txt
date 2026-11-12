@@ -1,0 +1,22 @@
+Vorlesung 3: Marktformen und Preisbildung
+
+1. Überblick
+Märkte lassen sich nach der Zahl der Anbieter und Nachfrager einteilen. Diese Einteilung heißt Marktformenschema. Man unterscheidet vor allem das Polypol, das Oligopol und das Monopol. Die Marktform bestimmt, wie viel Einfluss ein einzelnes Unternehmen auf den Preis hat.
+
+2. Das Polypol
+Im Polypol gibt es viele kleine Anbieter und viele kleine Nachfrager. Kein einzelner Anbieter kann den Marktpreis beeinflussen. Die Unternehmen sind Preisnehmer: Sie nehmen den Preis als gegeben hin und entscheiden nur über ihre Angebotsmenge. Ein Beispiel ist der Wochenmarkt mit vielen Gemüseständen.
+Beim vollkommenen Markt kommen weitere Bedingungen hinzu: Die Güter sind homogen, also gleichartig. Alle Marktteilnehmer haben vollständige Information (Markttransparenz). Es gibt keine persönlichen, räumlichen oder zeitlichen Präferenzen, und die Anpassung an Änderungen erfolgt unendlich schnell. Unter diesen Bedingungen bildet sich ein einheitlicher Gleichgewichtspreis.
+Ein Unternehmen im Polypol maximiert seinen Gewinn, wenn der Preis den Grenzkosten entspricht. Grenzkosten sind die zusätzlichen Kosten, die durch die Produktion einer weiteren Einheit entstehen. Liegt der Preis über den Grenzkosten, lohnt sich eine Ausweitung der Produktion.
+
+3. Das Oligopol
+Im Oligopol stehen wenige große Anbieter vielen Nachfragern gegenüber. Typische Beispiele sind der Mineralölmarkt oder der Mobilfunkmarkt. Das wichtigste Merkmal ist die gegenseitige Abhängigkeit (Interdependenz): Senkt ein Anbieter seinen Preis, reagieren die Konkurrenten, weil sie sonst Kunden verlieren.
+Deshalb beobachten Oligopolisten einander genau. Häufig kommt es zu Preisstarrheit, weil niemand einen Preiskampf auslösen will. Manchmal versuchen Oligopolisten, sich abzusprechen. Solche Absprachen heißen Kartelle und sind in Deutschland nach dem Gesetz gegen Wettbewerbsbeschränkungen verboten. Das Bundeskartellamt überwacht die Einhaltung.
+Eine besondere Form ist die Preisführerschaft: Ein großer Anbieter ändert den Preis, und die anderen folgen. So entsteht ein abgestimmtes Verhalten ohne ausdrückliche Absprache.
+
+4. Das Monopol
+Im Monopol gibt es nur einen einzigen Anbieter. Der Monopolist ist Preissetzer: Er kann den Preis selbst festlegen, muss aber beachten, dass die Nachfrage bei steigendem Preis sinkt. Er wählt deshalb den Punkt auf der Nachfragekurve, an dem sein Gewinn am größten ist.
+Der Monopolist maximiert seinen Gewinn dort, wo der Grenzerlös den Grenzkosten entspricht. Der Grenzerlös ist der zusätzliche Erlös aus dem Verkauf einer weiteren Einheit. Im Gewinnmaximum ist der Preis höher und die Menge kleiner als im Polypol. Diese Lage nennt man den Cournotschen Punkt.
+Für die Gesellschaft entsteht dadurch ein Wohlfahrtsverlust: Einige Käufer, die bereit wären, mehr als die Grenzkosten zu zahlen, kommen nicht zum Zug. Gründe für Monopole sind zum Beispiel Patente, staatliche Lizenzen oder sehr hohe Fixkosten, wie bei Stromnetzen. Man spricht dann von einem natürlichen Monopol.
+
+5. Zusammenfassung
+Je weniger Anbieter es gibt, desto größer ist ihr Einfluss auf den Preis. Im Polypol herrscht Preisnehmerverhalten, im Oligopol gegenseitige Abhängigkeit, im Monopol Preissetzung. Wettbewerbspolitik soll verhindern, dass Marktmacht missbraucht wird.

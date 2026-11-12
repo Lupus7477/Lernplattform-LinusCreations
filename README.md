@@ -1,183 +1,93 @@
-# 🎓 Lokale KI-Lernplattform
+# Lernpfad
 
-Eine vollständig lokal laufende KI-gestützte Lernplattform für die Prüfungsvorbereitung. Die Anwendung analysiert deine PDF-Dokumente (z.B. Vorlesungsskripte) und erstellt daraus einen personalisierten Lernplan mit Erklärungen und Quizfragen.
+Lern-App für die Prüfungsvorbereitung. Aus deinen PDF-Skripten entstehen kurze Lektionen mit Übungsfragen, ein Lernpfad, Wiederholungen und Streaks. Die KI läuft **komplett auf dem Gerät**: keine Cloud, kein Konto, nach dem ersten Start offline.
 
-## ✨ Features
+Läuft auf Linux, Windows, macOS, Android, iOS und iPadOS (eine Codebasis, [Tauri 2](https://v2.tauri.app)).
 
-- **100% Lokal**: Keine Cloud, keine externen APIs - alle Daten bleiben auf deinem Computer
-- **PDF-Analyse**: Automatisches Einlesen und Analysieren von PDF-Dokumenten
-- **Intelligenter Lernplan**: KI erstellt basierend auf Prüfungsdatum einen strukturierten Lernplan
-- **Adaptive Fragen**: Schwierigkeitsgrad steigt schrittweise an
-- **Fortschrittsverfolgung**: Dashboard mit Übersicht über deinen Lernfortschritt
-- **Interaktiver Chat**: Stelle Fragen zu deinen Lernmaterialien
+## So funktioniert es
 
-## 🏗️ Architektur
+1. **Hinzufügen:** PDF auswählen. Der Text wird auf dem Gerät gelesen (pdf.js) und in Abschnitte von etwa 5000 Zeichen geteilt. So wird das ganze Dokument abgedeckt.
+2. **Vorbereiten (KI, im Hintergrund):** Pro Abschnitt erzeugt die KI einen Titel, eine kurze Zusammenfassung und die wichtigsten Begriffe. Fragen entstehen erst, wenn eine Einheit dran ist; die nächste wird vorab vorbereitet.
+3. **Lernen (ohne KI):** Multiple Choice, Richtig/Falsch, Lückentext und Begriffe zuordnen. Die Antworten werden im Code geprüft, nicht von der KI. Falsche Aufgaben kommen am Ende der Lektion erneut.
+4. **Wiederholen:** Leitner-Boxen (1, 3, 7, 14, 30 Tage). Fällige Fragen landen im Tab „Wiederholen“.
+5. **Motivation:** XP, Tagesziel, Streak, Lernstufe je Einheit.
 
-```
-lernplattform/
-├── cmd/
-│   └── server/          # Haupteinstiegspunkt
-├── internal/
-│   ├── api/             # REST-API Handler & Router
-│   ├── config/          # Konfigurationsverwaltung
-│   ├── llm/             # LLM-Provider (Ollama) & Tutor-Logik
-│   ├── models/          # Datenmodelle
-│   ├── pdf/             # PDF-Parser
-│   └── storage/         # SQLite-Datenpersistenz
-├── web/
-│   └── static/          # Frontend (HTML, CSS, JS)
-└── config.json          # Konfigurationsdatei
-```
+Die KI wird nur gebraucht für: Import, „Ausführlich erklären“ (einmal erzeugt, danach gespeichert), „Frag die KI“ und „Warum?“ nach einer falschen Antwort.
 
-## 🚀 Installation
+## KI auf dem Gerät
+
+| Stufe | Modell | Größe | Standard auf |
+| --- | --- | --- | --- |
+| Kompakt | Qwen3.5 2B (Q4_K_M) | 1,3 GB | Android, iOS |
+| Ausgewogen | Qwen3.5 4B (Q4_K_M) | 2,7 GB | Linux, Windows, macOS |
+
+- llama.cpp ist als Bibliothek in die App eingebaut (`llama-cpp-2`). Nur so läuft KI auch auf iPhone und iPad, weil iOS keine nachgeladenen Programme erlaubt.
+- Bei jedem Start prüft die App das Modell und lädt es bei Bedarf herunter, auch abgebrochene Downloads werden fortgesetzt. Die URLs sind auf eine feste Hugging-Face-Revision gepinnt und die Dateigröße wird geprüft.
+- Das Modell wird erst geladen, wenn es gebraucht wird, und nach 3 Minuten Leerlauf wieder aus dem Speicher entfernt.
+- Sparsame Einstellungen: 4096 Token Kontext, KV-Cache in 8 Bit, alle Schichten auf der GPU (Vulkan unter Linux/Windows, Metal auf Apple-Geräten, CPU auf Android).
+- Strukturierte Ausgabe per JSON-Schema-Grammatik: Auch kleine Modelle liefern immer gültiges JSON.
+- Die Stufe lässt sich unter **Profil → KI auf diesem Gerät** wechseln.
+
+Speicherort der Modelle und der Datenbank (`lernen.db`): der App-Datenordner, unter Linux `~/.local/share/de.lernpfad.app/`.
+
+## Entwickeln
 
 ### Voraussetzungen
 
-1. **Go 1.21+** installieren: https://go.dev/dl/
-2. **Ollama** installieren: https://ollama.ai/download
+- Rust über [rustup](https://rustup.rs) und die Tauri-CLI: `cargo install tauri-cli --version "^2" --locked`
+- Linux (Debian/Ubuntu/Mint):
+  ```bash
+  sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev libayatana-appindicator3-dev \
+    libxdo-dev cmake libclang-dev libvulkan-dev glslc
+  ```
+- macOS: Xcode (für iOS zusätzlich die iOS-Plattform in Xcode)
+- Windows: Visual Studio Build Tools mit C++, CMake und das Vulkan SDK
+- Android: Android Studio mit SDK und NDK, JDK 17
 
-### Ollama einrichten
-
-```bash
-# Ollama starten (läuft im Hintergrund)
-ollama serve
-
-# Ein Modell herunterladen (z.B. Llama 3.2)
-ollama pull llama3.2
-```
-
-### Lernplattform starten
+### Starten
 
 ```bash
-# In das Projektverzeichnis wechseln
-cd lernplattform
-
-# Abhängigkeiten installieren
-go mod tidy
-
-# Server starten
-go run ./cmd/server
+cd src-tauri
+cargo tauri dev          # Desktop-App mit Neuladen
+cargo test               # Tests für Lernlogik und Import
+cargo tauri build        # Installationspaket für dieses System
 ```
 
-Die Anwendung ist dann unter **http://localhost:8080** erreichbar.
+Mobil:
 
-## 📖 Verwendung
-
-### Schritt 1: Dokumente hochladen
-
-1. Öffne die Anwendung im Browser
-2. Gehe zu **📚 Dokumente**
-3. Lade deine PDF-Dateien hoch oder klicke auf "Ordner scannen"
-
-### Schritt 2: Lernplan erstellen
-
-1. Gehe zu **📅 Lernplan**
-2. Wähle dein Prüfungsdatum
-3. Wähle die relevanten Dokumente aus
-4. Klicke auf "Lernplan erstellen"
-
-Die KI analysiert deine Dokumente und erstellt automatisch Themen/Kapitel.
-
-### Schritt 3: Lernen
-
-1. Gehe zu **📖 Lernen**
-2. Wähle ein Thema aus
-3. Die KI erklärt dir das Thema basierend auf deinen Materialien
-4. Markiere Themen als abgeschlossen
-
-### Schritt 4: Quiz
-
-1. Gehe zu **❓ Quiz**
-2. Wähle ein Thema und Schwierigkeitsgrad
-3. Beantworte die Fragen
-4. Erhalte sofortiges Feedback
-
-### Chat
-
-Im **💬 Chat** kannst du jederzeit Fragen zu deinen Lernmaterialien stellen.
-
-## ⚙️ Konfiguration
-
-Bearbeite `config.json`:
-
-```json
-{
-  "server_port": "8080",
-  "documents_path": "./dokumente",
-  "database_path": "lernplattform.db",
-  "ollama_url": "http://localhost:11434",
-  "default_model": "llama3.2",
-  "min_study_session_minutes": 30,
-  "max_questions_per_topic": 10
-}
+```bash
+cargo tauri android init && cargo tauri android dev
+cargo tauri ios init && cargo tauri ios dev      # nur auf einem Mac
 ```
 
-### Unterstützte Modelle
+Für iPhone/iPad brauchst du eine Apple-ID in Xcode (kostenlos: App läuft 7 Tage, Apple Developer Program: dauerhaft und TestFlight). Auf iOS läuft der Import nur, solange die App geöffnet ist.
 
-Die Plattform ist kompatibel mit allen Ollama-Modellen:
+### Oberfläche ohne Tauri
 
-- `llama3.2` (empfohlen)
-- `mistral`
-- `codellama`
-- `phi`
-- Und viele mehr...
+Die Oberfläche in `web/` kommt ohne Build-Schritt aus. Im Browser ersetzt `web/dev/mock-tauri.js` den Rust-Kern durch Beispieldaten:
 
-## 🔒 Datenschutz
-
-- **Alle Daten bleiben lokal**: Dokumente, Lernfortschritt und Chat-Verläufe
-- **Keine Internetverbindung nötig** (nach Installation von Ollama)
-- **SQLite-Datenbank**: Alle Daten in einer lokalen Datei
-- **Keine Telemetrie**: Kein Tracking, keine Analytics
-
-## 🛠️ Entwicklung
-
-### Projektstruktur erweitern
-
-**Neuen LLM-Provider hinzufügen:**
-
-Implementiere das `llm.Provider`-Interface:
-
-```go
-type Provider interface {
-    Generate(ctx context.Context, prompt string, options *GenerateOptions) (*GenerateResponse, error)
-    GenerateStream(ctx context.Context, prompt string, options *GenerateOptions) (<-chan StreamChunk, error)
-    Chat(ctx context.Context, messages []ChatMessage, options *GenerateOptions) (*GenerateResponse, error)
-    GetModels(ctx context.Context) ([]ModelInfo, error)
-    IsAvailable(ctx context.Context) bool
-    GetName() string
-}
+```bash
+python3 -m http.server 8765 -d web
+# http://127.0.0.1:8765/            KI lädt simuliert
+# http://127.0.0.1:8765/?ai=ready   KI sofort bereit
+# http://127.0.0.1:8765/?empty      ohne Kurse
 ```
 
-### API-Endpoints
+## Aufbau
 
-| Methode | Endpoint | Beschreibung |
-|---------|----------|--------------|
-| GET | `/api/v1/health` | Systemstatus |
-| GET | `/api/v1/documents` | Alle Dokumente |
-| POST | `/api/v1/documents` | Dokument hochladen |
-| POST | `/api/v1/documents/scan` | Ordner scannen |
-| GET | `/api/v1/plans` | Alle Lernpläne |
-| POST | `/api/v1/plans` | Neuen Lernplan erstellen |
-| GET | `/api/v1/plans/active` | Aktiver Lernplan |
-| GET | `/api/v1/topics/{id}/explain` | Themenerklärung |
-| POST | `/api/v1/topics/{id}/questions/generate` | Fragen generieren |
-| POST | `/api/v1/questions/{id}/answer` | Antwort einreichen |
-| POST | `/api/v1/chat` | Chat-Nachricht senden |
-| GET | `/api/v1/progress` | Lernfortschritt |
+```
+src-tauri/src/
+  lib.rs      Tauri-Befehle für die Oberfläche
+  ai.rs       Modell-Download, Laden/Entladen, Text erzeugen (llama.cpp)
+  import.rs   Abschnitte, Prompts, Qualitätsfilter für Fragen, Hintergrund-Worker
+  learn.rs    Antwortprüfung, Leitner-Boxen, XP, Streak (ohne KI)
+  db.rs       SQLite-Schema
+web/
+  index.html, css/app.css, js/*.js   Oberfläche (Vanilla-JS-Module)
+  vendor/                            pdf.js, marked
+  fonts/, icons.svg                  Bricolage Grotesque, Figtree, Phosphor Icons
+```
 
-## 📋 Roadmap
+## Datenschutz
 
-- [ ] Export von Lernfortschritt (PDF/CSV)
-- [ ] Spaced Repetition Algorithmus
-- [ ] Mehrere Benutzerprofile
-- [ ] Dark Mode
-- [ ] Mobile App (PWA)
-- [ ] Weitere LLM-Provider (LocalAI, etc.)
-
-## 🤝 Lizenz
-
-Dieses Projekt ist für den persönlichen Bildungsgebrauch gedacht.
-
----
-
-**Hinweis**: Diese Anwendung nutzt ausschließlich die von dir bereitgestellten Materialien als Wissensquelle. Die KI kann keine Informationen erfinden, die nicht in deinen Dokumenten enthalten sind.
+Alles bleibt auf dem Gerät: Dokumente, Fortschritt und Chats. Die App geht nur ins Internet, um einmalig das KI-Modell von Hugging Face zu laden.

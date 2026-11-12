@@ -76,3 +76,7 @@ temp/
 dist/
 build/
 out/
+# === Rust / Tauri ===
+/src-tauri/target/
+/src-tauri/gen/
+.playwright-mcp/

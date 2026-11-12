@@ -1,0 +1,129 @@
+import { call, on } from "./api.js";
+import { applyTheme, h, icon } from "./ui.js";
+import { currentCourse, emit, loadCourses, loadStats, selectCourse, state, subscribe } from "./state.js";
+import * as path from "./path.js";
+import * as review from "./review.js";
+import * as add from "./import.js";
+import * as profile from "./profile.js";
+import * as unit from "./unit.js";
+import { openLesson } from "./lesson.js";
+
+const views = { learn: path, review, add, profile, unit };
+const TABS = [
+  ["learn", "path", "Lernen"],
+  ["review", "cards", "Wiederholen"],
+  ["add", "plus-circle", "Hinzufügen"],
+  ["profile", "user-circle", "Profil"],
+];
+
+let main;
+let topbar;
+let tabs;
+let mounted = { name: null, arg: null, el: null };
+let lesson = null;
+
+async function boot() {
+  if (!window.__TAURI__) await import("../dev/mock-tauri.js");
+  applyTheme();
+  const sprite = await fetch("icons.svg").then((r) => r.text());
+  document.body.insertAdjacentHTML("afterbegin", sprite);
+
+  [state.ai] = await Promise.all([call("ai_status"), loadCourses(), loadStats()]);
+
+  topbar = h("header.topbar");
+  main = h("main", { id: "main", tabindex: "-1" });
+  tabs = h(
+    "nav.tabbar",
+    { "aria-label": "Hauptnavigation" },
+    h("div.brand", icon("path"), "Lernpfad"),
+    TABS.map(([name, ic, label]) => h("a.tab", { href: `#/${name}`, "data-tab": name }, icon(ic), h("span", label))),
+  );
+  document.getElementById("app").replaceChildren(topbar, main, tabs);
+  renderTopbar();
+  subscribe((kind) => {
+    if (kind === "stats" || kind === "course-selected" || kind === "courses") renderTopbar();
+  });
+
+  on("ai-status", (s) => {
+    state.ai = s;
+    emit("ai", s);
+  });
+  let pending;
+  on("course-updated", (id) => {
+    clearTimeout(pending);
+    pending = setTimeout(async () => {
+      await loadCourses();
+      emit("course-updated", id);
+    }, 300);
+  });
+
+  addEventListener("hashchange", route);
+  route();
+}
+
+function renderTopbar() {
+  const s = state.stats || { streak: 0, xp_today: 0, goal: 20 };
+  const course = currentCourse();
+  let courseEl;
+  if (state.courses.length > 1) {
+    const select = h(
+      "select",
+      { "aria-label": "Kurs wählen", onchange: (e) => selectCourse(Number(e.target.value)) },
+      state.courses.map((c) => h("option", { value: String(c.id), selected: c.id === course?.id }, c.name)),
+    );
+    courseEl = h("label.chip.course-pill", { style: { position: "relative" } }, h("span", course?.name), icon("caret-down"), select);
+  } else {
+    courseEl = h("span.mark-brand", icon("path"), "Lernpfad"); // ein Kurs: Name steht schon als Überschrift
+  }
+  const p = Math.min(1, s.xp_today / Math.max(1, s.goal));
+  topbar.replaceChildren(
+    courseEl,
+    h("span.spacer"),
+    h("span.chip.streak" + (s.streak ? "" : ".off"), { "aria-label": `Streak: ${s.streak} ${s.streak === 1 ? "Tag" : "Tage"}` }, icon("fire-fill"), h("span.num", String(s.streak))),
+    h("span.chip", { "aria-label": `Heute ${s.xp_today} von ${s.goal} XP` }, h("span.ring", { style: { "--p": String(p) } }), h("span.num", `${s.xp_today} XP`)),
+  );
+}
+
+function parse() {
+  const [name = "learn", arg] = location.hash.replace(/^#\/?/, "").split("/");
+  return { name: name || "learn", arg };
+}
+
+async function route() {
+  const { name, arg } = parse();
+  if (name === "lesson") {
+    const base = arg === "review" ? "review" : "learn";
+    if (mounted.name !== base) await show(base);
+    lesson?.close();
+    lesson = openLesson(arg === "review" ? null : Number(arg), () => {
+      lesson = null;
+      location.replace(`#/${base}`);
+    });
+    return;
+  }
+  if (lesson) {
+    lesson.close();
+    lesson = null;
+  }
+  if (!views[name]) return location.replace("#/learn");
+  await show(name, arg);
+}
+
+async function show(name, arg) {
+  const same = mounted.name === name && mounted.arg === arg;
+  mounted.el?.cleanup?.();
+  const el = await views[name].render(arg);
+  mounted = { name, arg, el };
+  main.replaceChildren(el);
+  const tab = name === "unit" ? "learn" : name;
+  tabs.querySelectorAll(".tab").forEach((t) => (t.dataset.tab === tab ? t.setAttribute("aria-current", "page") : t.removeAttribute("aria-current")));
+  if (!same) {
+    scrollTo(0, 0);
+    main.focus({ preventScroll: true });
+  }
+}
+
+boot().catch((e) => {
+  document.getElementById("app").replaceChildren(h("div.page", h("div.notice.error", icon("warning"), h("b", "Die App konnte nicht starten"), h("span", String(e?.message || e)))));
+  console.error(e);
+});
