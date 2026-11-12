@@ -41,4 +41,7 @@ jobs:
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          gzip -c /tmp/lernpfad.tar | ssh -o ServerAliveInterval=30 "root@$HOST"
+          # Der richtige Schlüssel ignoriert diesen Befehl und startet deploy.sh (Zwangsbefehl).
+          # Ist DEPLOY_KEY ein normaler Schlüssel, bricht es hier ab, statt das Image in eine Shell zu schieben.
+          gzip -c /tmp/lernpfad.tar | ssh -o ServerAliveInterval=30 "root@$HOST" \
+            'echo "DEPLOY_KEY ist nicht der eingeschränkte Deploy-Schlüssel (siehe README)" >&2; exit 1'
