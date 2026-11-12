@@ -337,7 +337,7 @@ function membersCard() {
 // ---------- App: mit eigenem Server verbinden (lokal bleibt immer verfügbar) ----------
 
 function connectCard() {
-  const link = h("input.input", { id: "srv-link", autocomplete: "off", spellcheck: "false", placeholder: "lernpfad://…" });
+  const link = h("input.input", { id: "srv-link", autocomplete: "off", spellcheck: "false", placeholder: "https://…/#pin=…" });
   const name = h("input.input", { id: "srv-name", autocomplete: "username", autocapitalize: "none" });
   const password = h("input.input", { id: "srv-pw", type: "password", autocomplete: "current-password" });
   const err = h("p.form-error", { role: "alert", hidden: true });
@@ -358,7 +358,7 @@ function connectCard() {
     "details.card.q-box",
     h("summary", h("h2", "Eigener Server"), icon("caret-down")),
     h("p.muted", "Mit deinem Lernpfad-Server lernen, z. B. zusammen mit Kommilitonen. Deine Daten auf diesem Gerät bleiben unberührt, „Zurück zu lokal“ geht jederzeit."),
-    h("div.field", h("label", { for: "srv-link" }, "Verbindungslink"), link, h("span.hint", "Bekommst du vom Admin des Servers (Profil → Mitglieder).")),
+    h("div.field", h("label", { for: "srv-link" }, "Verbindungslink"), link, h("span.hint", "Im Browser auf dem Server: Profil → Konto → „Verbindungslink für die App“.")),
     h("div.field", h("label", { for: "srv-name" }, "Name"), name),
     h("div.field", h("label", { for: "srv-pw" }, "Passwort"), password),
     err,

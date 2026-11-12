@@ -264,7 +264,7 @@ const handlers = {
   members: () => members,
   member_disable: ({ id, disabled }) => (members.find((m) => m.id === id).disabled = disabled),
   invite_create: ({ userId }) => ({ link: `${location.origin}/#/${userId ? "reset" : "join"}/c0ffee${Date.now().toString(16)}`, expires_at: now() + 7 * DAY }),
-  connect_link: () => ({ link: `lernpfad://${location.host}#sha256=AB:CD:EF` }),
+  connect_link: () => ({ link: `https://${location.host}/#pin=${"ab".repeat(32)}` }),
 };
 let fails = 0;
 function full(x) {
