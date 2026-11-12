@@ -1,11 +1,14 @@
 //! Alle Befehle der Oberfläche an einer Stelle. Tauri-App und Server rufen nur [`call`] auf.
 //! Jede Kurs-, Einheiten- und Fragen-ID wird gegen die Rechte des Nutzers geprüft.
 
+use std::collections::HashMap;
+
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::ai::{self, Gen, Msg};
+use crate::learn::{Group, Spot};
 use crate::{db, import, learn, Core, Who};
 
 type R<T> = Result<T, String>;
@@ -70,14 +73,40 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
             ok(conn.execute("DELETE FROM courses WHERE id = ?1", [id]).map_err(err)?)
         }
         "import_document" => {
-            let (course_id, name, pages) = args!(v, { course_id: i64, name: String, pages: Vec<String> });
+            let (course_id, name, pages, figures) = args!(v, { course_id: i64, name: String, pages: Vec<String>, figures: Option<Vec<import::FigureIn>> });
             owner(role(&c.db.lock().unwrap(), who, course_id)?)?;
-            let (_, units) = import::store_document(&c.db, course_id, head(name.trim(), 200), &pages).map_err(err)?;
+            let (_, units, figures) = import::store_document(&c.db, course_id, head(name.trim(), 200), &pages, &figures.unwrap_or_default()).map_err(err)?;
             if units == 0 {
                 return Err("In diesem PDF wurde kein Text gefunden. Ist es eingescannt?".into());
             }
             c.wake();
-            ok(Imported { units })
+            ok(Imported { units, figures })
+        }
+        // Grafiken für ein schon eingelesenes PDF nachladen (dieselbe Datei noch einmal gewählt)
+        "import_figures" => {
+            let (document_id, figures) = args!(v, { document_id: i64, figures: Vec<import::FigureIn> });
+            let conn = c.db.lock().unwrap();
+            let course: i64 = conn
+                .query_row("SELECT course_id FROM documents WHERE id = ?1", [document_id], |r| r.get(0))
+                .optional()
+                .map_err(err)?
+                .ok_or(DENIED)?;
+            owner(role(&conn, who, course)?)?;
+            let figures = import::store_figures(&conn, document_id, &figures).map_err(err)?;
+            ok(Imported { units: 0, figures })
+        }
+        "figure" => {
+            let figure_id = args!(v, { figure_id: i64 });
+            let conn = c.db.lock().unwrap();
+            let unit_id: i64 = conn.query_row("SELECT unit_id FROM figures WHERE id = ?1", [figure_id], |r| r.get(0)).optional().map_err(err)?.ok_or(DENIED)?;
+            unit_role(&conn, who, unit_id)?;
+            ok(figures_where(&conn, "id = ?1", figure_id)?.pop())
+        }
+        "unit_figures" => {
+            let unit_id = args!(v, { unit_id: i64 });
+            let conn = c.db.lock().unwrap();
+            unit_role(&conn, who, unit_id)?;
+            ok(figures_where(&conn, "unit_id = ?1 ORDER BY page IS NULL, page, id", unit_id)?)
         }
         "course_path" => ok(course_path(c, who, args!(v, { course_id: i64 }))?),
         "unit" => ok(unit(c, who, args!(v, { unit_id: i64 }))?),
@@ -128,9 +157,28 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
             ok(questions_where(&conn, who, "q.id = ?1", question_id)?.pop())
         }
         "update_question" => {
-            let (question_id, prompt, options, answer, why) =
-                args!(v, { question_id: i64, prompt: String, options: Vec<String>, answer: String, why: String });
-            ok(update_question(c, who, question_id, prompt, options, answer, why)?)
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                question_id: i64,
+                #[serde(flatten)]
+                q: QuestionIn,
+            }
+            let a: A = serde_json::from_value(v).map_err(err)?;
+            ok(update_question(c, who, a.question_id, a.q)?)
+        }
+        // Eigene Aufgabe auf der Lernkarte: gilt wie Bearbeiten für alle im Kurs
+        "create_question" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                unit_id: i64,
+                kind: String,
+                #[serde(flatten)]
+                q: QuestionIn,
+            }
+            let a: A = serde_json::from_value(v).map_err(err)?;
+            ok(create_question(c, who, a.unit_id, a.kind, a.q)?)
         }
         "hide_question" => {
             let (question_id, hidden) = args!(v, { question_id: i64, hidden: bool });
@@ -220,6 +268,12 @@ struct TierInfo {
 
 // ---------- Kurse & Import ----------
 
+#[derive(Serialize, Deserialize)]
+struct DocOut {
+    id: i64,
+    name: String,
+}
+
 #[derive(Serialize)]
 struct Course {
     id: i64,
@@ -227,7 +281,7 @@ struct Course {
     exam_date: Option<String>,
     units: i64,
     ready: i64,
-    documents: Vec<String>,
+    documents: Vec<DocOut>,
     /// Eigener Kurs (darf bearbeiten, löschen, PDFs hinzufügen)
     mine: bool,
     shared: bool,
@@ -241,7 +295,7 @@ fn courses(c: &Core, who: &Who) -> R<Vec<Course>> {
             "SELECT c.id, c.name, c.exam_date,
                (SELECT COUNT(*) FROM units u WHERE u.course_id = c.id),
                (SELECT COUNT(*) FROM units u WHERE u.course_id = c.id AND u.status = 'ready'),
-               (SELECT COALESCE(group_concat(d.name, char(10)), '') FROM documents d WHERE d.course_id = c.id),
+               (SELECT json_group_array(json_object('id', d.id, 'name', d.name)) FROM (SELECT id, name FROM documents WHERE course_id = c.id ORDER BY id) d),
                c.owner_id = ?1, c.shared, COALESCE(o.name, '')
              FROM courses c LEFT JOIN users o ON o.id = c.owner_id
              WHERE c.owner_id = ?1 OR c.shared = 1 ORDER BY c.created_at",
@@ -256,7 +310,7 @@ fn courses(c: &Core, who: &Who) -> R<Vec<Course>> {
                 exam_date: r.get(2)?,
                 units: r.get(3)?,
                 ready: r.get(4)?,
-                documents: docs.lines().map(String::from).collect(),
+                documents: serde_json::from_str(&docs).unwrap_or_default(),
                 mine: r.get(6)?,
                 shared: r.get(7)?,
                 owner: r.get(8)?,
@@ -298,6 +352,20 @@ fn update_course(c: &Core, who: &Who, id: i64, name: &str, exam_date: Option<Str
 #[derive(Serialize)]
 struct Imported {
     units: usize,
+    figures: usize,
+}
+
+#[derive(Serialize)]
+struct FigureOut {
+    id: i64,
+    page: Option<i64>,
+    image: String,
+}
+
+fn figures_where(conn: &Connection, where_sql: &str, id: i64) -> R<Vec<FigureOut>> {
+    let mut stmt = conn.prepare(&format!("SELECT id, page, image FROM figures WHERE {where_sql}")).map_err(err)?;
+    let rows = stmt.query_map([id], |r| Ok(FigureOut { id: r.get(0)?, page: r.get(1)?, image: r.get(2)? })).map_err(err)?;
+    rows.collect::<Result<_, _>>().map_err(err)
 }
 
 // ---------- Lernpfad & Einheit ----------
@@ -475,13 +543,59 @@ fn ask(c: &Core, who: &Who, unit_id: Option<i64>, messages: Vec<ChatIn>, on_toke
 
 // ---------- Lektion ----------
 
-#[derive(Serialize)]
+/// Eine Aufgabe, wie sie in die Lektion geht: nie mit Lösung.
+#[derive(Serialize, Default)]
 struct Exercise {
     id: Option<i64>,
     kind: String,
     prompt: String,
     options: Vec<String>,
     pairs: Vec<[String; 2]>,
+    /// Feldnamen (sort)
+    groups: Vec<String>,
+    /// Stellen [x, y, w, h] im Bild, ohne Beschriftung (label)
+    spots: Vec<[f64; 4]>,
+    /// data:-URL der Grafik (label)
+    image: Option<String>,
+}
+
+/// Zeile aus der Datenbank → Aufgabe. Strukturaufgaben werden hier umgebaut, damit die Lösung im Kern bleibt.
+fn to_exercise(p: Picked, rng: &mut learn::Shuffler) -> Exercise {
+    let mut options: Vec<String> = serde_json::from_str(&p.options).unwrap_or_default();
+    let groups: Vec<Group> = serde_json::from_str(&p.groups).unwrap_or_default();
+    let spots: Vec<Spot> = serde_json::from_str(&p.spots).unwrap_or_default();
+    let mut prompt = p.prompt;
+    match p.kind.as_str() {
+        "sort" => options = groups.iter().flat_map(|g| g.items.clone()).chain(options).collect(),
+        "cloze" => {
+            let (text, gaps) = learn::cloze_parts(&prompt);
+            prompt = text;
+            options = gaps.into_iter().chain(options).collect();
+        }
+        "label" => options = spots.iter().map(|s| s.label.clone()).chain(options).collect(),
+        _ => {}
+    }
+    if p.kind != "true_false" {
+        let solved = options.clone();
+        rng.shuffle(&mut options);
+        // Reihenfolge nicht zufällig schon richtig hinlegen
+        for _ in 0..8 {
+            if p.kind != "order" || options != solved {
+                break;
+            }
+            rng.shuffle(&mut options);
+        }
+    }
+    Exercise {
+        id: Some(p.id),
+        prompt,
+        options,
+        groups: groups.into_iter().map(|g| g.name).collect(),
+        spots: spots.iter().map(|s| [s.x, s.y, s.w, s.h]).collect(),
+        image: if p.kind == "label" { p.image } else { None },
+        kind: p.kind,
+        ..Default::default()
+    }
 }
 
 #[derive(Serialize)]
@@ -499,17 +613,19 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>) -> R<LessonOut> {
     let now = db::now();
     let mut rng = learn::Shuffler::new();
 
-    let mut picked: Vec<(i64, String, String, String)>;
+    let mut picked: Vec<Picked>;
     if let Some(id) = unit_id {
         let (course_id, _) = unit_role(&conn, who, id)?;
+        // Hat die Einheit nur Grafik- oder eigene Aufgaben, schreibt die KI trotzdem ihre Fragen.
+        let _ = conn.execute("UPDATE units SET q_state = 1 WHERE id = ?1 AND q_state = 0 AND status = 'ready'", [id]);
         let (idx, q_state): (i64, i64) = conn.query_row("SELECT idx, q_state FROM units WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?;
         // Nächste Einheit schon vorbereiten, während diese geübt wird.
         let _ = conn.execute("UPDATE units SET q_state = 1 WHERE course_id = ?1 AND idx = ?2 AND q_state = 0", params![course_id, idx + 1]);
         // Fällige zuerst, dann neue, dann die mit der niedrigsten Box. Ausgeblendete nie.
         picked = query_questions(
             &conn,
-            "SELECT q.id, q.kind, q.prompt, q.options FROM questions q
-             LEFT JOIN progress p ON p.question_id = q.id AND p.user_id = ?4
+            "SELECT q.id, q.kind, q.prompt, q.options, q.groups, q.spots, f.image FROM questions q
+             LEFT JOIN progress p ON p.question_id = q.id AND p.user_id = ?4 LEFT JOIN figures f ON f.id = q.figure_id
              WHERE q.unit_id = ?1 AND COALESCE(p.hidden, 0) = 0
              ORDER BY CASE WHEN p.box > 0 AND p.due_at <= ?2 THEN 0 WHEN COALESCE(p.box, 0) = 0 THEN 1 ELSE 2 END,
                       COALESCE(p.box, 0), COALESCE(p.due_at, 0), q.id
@@ -542,8 +658,9 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>) -> R<LessonOut> {
     } else {
         picked = query_questions(
             &conn,
-            "SELECT q.id, q.kind, q.prompt, q.options FROM progress p
+            "SELECT q.id, q.kind, q.prompt, q.options, q.groups, q.spots, f.image FROM progress p
              JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id JOIN courses c ON c.id = u.course_id
+             LEFT JOIN figures f ON f.id = q.figure_id
              WHERE p.user_id = ?3 AND p.hidden = 0 AND p.box > 0 AND p.due_at <= ?1 AND (c.owner_id = ?3 OR c.shared = 1)
              ORDER BY p.due_at LIMIT ?2",
             params![now, 10, who.id],
@@ -551,17 +668,8 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>) -> R<LessonOut> {
     }
 
     rng.shuffle(&mut picked);
-    let ids: Vec<String> = picked.iter().map(|p| p.0.to_string()).collect();
-    let mut exercises: Vec<Exercise> = picked
-        .into_iter()
-        .map(|(id, kind, prompt, options)| {
-            let mut options: Vec<String> = serde_json::from_str(&options).unwrap_or_default();
-            if kind != "true_false" {
-                rng.shuffle(&mut options);
-            }
-            Exercise { id: Some(id), kind, prompt, options, pairs: vec![] }
-        })
-        .collect();
+    let ids: Vec<String> = picked.iter().map(|p| p.id.to_string()).collect();
+    let mut exercises: Vec<Exercise> = picked.into_iter().map(|p| to_exercise(p, &mut rng)).collect();
 
     // Zuordnen-Runde aus den Begriffen – ganz ohne KI.
     let term_sql = match unit_id {
@@ -583,15 +691,27 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>) -> R<LessonOut> {
         terms.truncate(4);
         if terms.len() >= 3 {
             let at = exercises.len().min(3);
-            exercises.insert(at, Exercise { id: None, kind: "match".into(), prompt: "Ordne die Begriffe zu".into(), options: vec![], pairs: terms });
+            exercises.insert(at, Exercise { kind: "match".into(), prompt: "Ordne die Begriffe zu".into(), pairs: terms, ..Default::default() });
         }
     }
     Ok(LessonOut { ready: true, failed: false, exercises })
 }
 
-fn query_questions(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> R<Vec<(i64, String, String, String)>> {
+struct Picked {
+    id: i64,
+    kind: String,
+    prompt: String,
+    options: String,
+    groups: String,
+    spots: String,
+    image: Option<String>,
+}
+
+fn query_questions(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> R<Vec<Picked>> {
     let mut stmt = conn.prepare(sql).map_err(err)?;
-    let rows = stmt.query_map(p, |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(err)?;
+    let rows = stmt
+        .query_map(p, |r| Ok(Picked { id: r.get(0)?, kind: r.get(1)?, prompt: r.get(2)?, options: r.get(3)?, groups: r.get(4)?, spots: r.get(5)?, image: r.get(6)? }))
+        .map_err(err)?;
     rows.collect::<Result<_, _>>().map_err(err)
 }
 
@@ -600,21 +720,46 @@ struct AnswerOut {
     correct: bool,
     expected: String,
     why: String,
+    /// Lösung je Teil, damit die Oberfläche jede Aussage, Lücke oder Stelle einzeln markiert (sonst null)
+    solution: Value,
+}
+
+/// Prüft ohne KI. Strukturaufgaben schicken `given` als JSON; kaputtes JSON zählt wie eine leere Antwort.
+fn grade(kind: &str, prompt: &str, options: &str, expected: &str, groups: &str, spots: &str, given: &str) -> (bool, Value) {
+    let options: Vec<String> = serde_json::from_str(options).unwrap_or_default();
+    match kind {
+        "sort" => {
+            let groups: Vec<Group> = serde_json::from_str(groups).unwrap_or_default();
+            let placed: HashMap<String, Vec<String>> = serde_json::from_str(given).unwrap_or_default();
+            let n = groups.iter().map(|g| g.items.len()).sum::<usize>() + options.len();
+            (learn::passed(learn::sort_mistakes(&groups, &options, &placed), n), json!(groups))
+        }
+        "order" | "cloze" | "label" => {
+            let want = match kind {
+                "order" => options,
+                "cloze" => learn::cloze_parts(prompt).1,
+                _ => serde_json::from_str::<Vec<Spot>>(spots).unwrap_or_default().into_iter().map(|s| s.label).collect(),
+            };
+            let got: Vec<String> = serde_json::from_str(given).unwrap_or_default();
+            (learn::passed(learn::seq_mistakes(&want, &got), want.len()), json!(want))
+        }
+        _ => (learn::check(kind, expected, given), Value::Null),
+    }
 }
 
 /// Prüft ohne KI. `retry` = Wiederholung innerhalb derselben Lektion → Box bleibt unverändert.
 fn answer(c: &Core, who: &Who, question_id: i64, given: &str, retry: bool) -> R<AnswerOut> {
     let conn = c.db.lock().unwrap();
     question_role(&conn, who, question_id)?;
-    let (kind, expected, why, boxed): (String, String, String, i64) = conn
+    let (kind, prompt, options, expected, why, groups, spots, boxed): (String, String, String, String, String, String, String, i64) = conn
         .query_row(
-            "SELECT q.kind, q.answer, q.why, COALESCE(p.box, 0) FROM questions q
+            "SELECT q.kind, q.prompt, q.options, q.answer, q.why, q.groups, q.spots, COALESCE(p.box, 0) FROM questions q
              LEFT JOIN progress p ON p.question_id = q.id AND p.user_id = ?2 WHERE q.id = ?1",
             params![question_id, who.id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
         )
         .map_err(err)?;
-    let correct = learn::check(&kind, &expected, given);
+    let (correct, solution) = grade(&kind, &prompt, &options, &expected, &groups, &spots, given);
     if !retry {
         let b = learn::next_box(boxed, correct);
         conn.execute(
@@ -624,7 +769,7 @@ fn answer(c: &Core, who: &Who, question_id: i64, given: &str, retry: bool) -> R<
         )
         .map_err(err)?;
     }
-    Ok(AnswerOut { correct, expected, why })
+    Ok(AnswerOut { correct, expected, why, solution })
 }
 
 #[derive(Serialize)]
@@ -728,6 +873,9 @@ struct QuestionOut {
     options: Vec<String>,
     answer: String,
     why: String,
+    groups: Vec<Group>,
+    spots: Vec<Spot>,
+    figure_id: Option<i64>,
     /// Von mir ausgeblendet
     hidden: bool,
     /// Mein Kurs → darf für alle löschen
@@ -737,7 +885,8 @@ struct QuestionOut {
 
 fn questions_where(conn: &Connection, who: &Who, where_sql: &str, id: i64) -> R<Vec<QuestionOut>> {
     let sql = format!(
-        "SELECT q.id, q.unit_id, q.kind, q.prompt, q.options, q.answer, q.why, COALESCE(p.hidden, 0), c.owner_id = ?2, c.shared
+        "SELECT q.id, q.unit_id, q.kind, q.prompt, q.options, q.answer, q.why, COALESCE(p.hidden, 0), c.owner_id = ?2, c.shared,
+           q.groups, q.spots, q.figure_id
          FROM questions q JOIN units u ON u.id = q.unit_id JOIN courses c ON c.id = u.course_id
          LEFT JOIN progress p ON p.question_id = q.id AND p.user_id = ?2
          WHERE {where_sql}"
@@ -746,6 +895,7 @@ fn questions_where(conn: &Connection, who: &Who, where_sql: &str, id: i64) -> R<
     let rows = stmt
         .query_map(params![id, who.id], |r| {
             let options: String = r.get(4)?;
+            let (groups, spots): (String, String) = (r.get(10)?, r.get(11)?);
             Ok(QuestionOut {
                 id: r.get(0)?,
                 unit_id: r.get(1)?,
@@ -754,6 +904,9 @@ fn questions_where(conn: &Connection, who: &Who, where_sql: &str, id: i64) -> R<
                 options: serde_json::from_str(&options).unwrap_or_default(),
                 answer: r.get(5)?,
                 why: r.get(6)?,
+                groups: serde_json::from_str(&groups).unwrap_or_default(),
+                spots: serde_json::from_str(&spots).unwrap_or_default(),
+                figure_id: r.get(12)?,
                 hidden: r.get(7)?,
                 mine: r.get(8)?,
                 shared: r.get(9)?,
@@ -763,25 +916,109 @@ fn questions_where(conn: &Connection, who: &Who, where_sql: &str, id: i64) -> R<
     rows.collect::<Result<_, _>>().map_err(err)
 }
 
-/// Ändert die Frage für alle im Kurs. Dieselbe Formprüfung wie bei KI-Fragen, nur ohne die Stil-Filter.
-fn update_question(c: &Core, who: &Who, question_id: i64, prompt: String, options: Vec<String>, answer: String, why: String) -> R<QuestionOut> {
+/// Eingabe beim Bearbeiten und Anlegen. `image` = neues Bild (data:-URL), sonst `figure_id` einer Grafik derselben Einheit.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuestionIn {
+    prompt: String,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(default)]
+    answer: String,
+    #[serde(default)]
+    why: String,
+    #[serde(default)]
+    groups: Vec<Group>,
+    #[serde(default)]
+    spots: Vec<Spot>,
+    figure_id: Option<i64>,
+    image: Option<String>,
+}
+
+fn form_hint(kind: &str) -> &'static str {
+    match kind {
+        "mc" => "Multiple Choice braucht 4 verschiedene Antworten, eine davon richtig.",
+        "fill_blank" => "Ein Lückentext braucht genau eine Lücke ___ und die Antwort unter den Optionen.",
+        "cloze" => "Markiere 1 bis 5 Lücken mit [eckigen Klammern].",
+        "sort" => "Zuordnen braucht 2 bis 4 Felder mit zusammen 3 bis 12 verschiedenen Aussagen.",
+        "order" => "Eine Reihenfolge braucht 3 bis 7 verschiedene Schritte.",
+        "label" => "Setze 1 bis 12 Stellen ins Bild und beschrifte jede.",
+        _ => "",
+    }
+}
+
+/// Dieselbe Formprüfung wie bei KI-Fragen, nur ohne die Stil-Filter. Speichert ein neues Bild erst, wenn die Aufgabe passt.
+fn checked(conn: &Connection, unit_id: i64, kind: String, i: QuestionIn) -> R<(import::Question, Option<i64>)> {
+    let long = |s: &str, n: usize| s.chars().count() > n;
+    let too_long = long(&i.prompt, 600)
+        || long(&i.why, 1000)
+        || i.options.len() > 6
+        || i.options.iter().any(|o| long(o, 200))
+        || i.groups.len() > 4
+        || i.groups.iter().any(|g| long(&g.name, 60) || g.items.len() > 8 || g.items.iter().any(|x| long(x, 200)))
+        || i.spots.len() > 12;
+    if too_long {
+        return Err("Die Aufgabe ist zu lang.".into());
+    }
+    let (label, hint) = (kind == "label", form_hint(&kind));
+    let q = import::fix(import::Question { kind, prompt: i.prompt, options: i.options, answer: i.answer, why: i.why, groups: i.groups, spots: i.spots }, false)
+        .ok_or_else(|| format!("So geht die Aufgabe nicht: Sie braucht mindestens 8 Zeichen. {hint}"))?;
+    if !label {
+        return Ok((q, None));
+    }
+    let figure = match (i.image, i.figure_id) {
+        (Some(img), _) => {
+            if !import::valid_image(&img) {
+                return Err("Das Bild geht so nicht: JPEG, PNG oder WebP bis 2 MB.".into());
+            }
+            conn.execute("INSERT INTO figures(unit_id, page, image) VALUES(?1, NULL, ?2)", params![unit_id, img]).map_err(err)?;
+            conn.last_insert_rowid()
+        }
+        (None, Some(id)) => {
+            let mine: i64 = conn.query_row("SELECT COUNT(*) FROM figures WHERE id = ?1 AND unit_id = ?2", params![id, unit_id], |r| r.get(0)).map_err(err)?;
+            if mine == 0 {
+                return Err(DENIED.into());
+            }
+            id
+        }
+        (None, None) => return Err("Wähle zuerst ein Bild.".into()),
+    };
+    Ok((q, Some(figure)))
+}
+
+/// Ändert die Frage für alle im Kurs. Ohne neues Bild bleibt die bisherige Grafik.
+fn update_question(c: &Core, who: &Who, question_id: i64, mut i: QuestionIn) -> R<QuestionOut> {
     let conn = c.db.lock().unwrap();
     question_role(&conn, who, question_id)?;
-    let kind: String = conn.query_row("SELECT kind FROM questions WHERE id = ?1", [question_id], |r| r.get(0)).map_err(err)?;
-    let too_long = prompt.chars().count() > 600 || why.chars().count() > 1000 || options.len() > 6 || options.iter().any(|o| o.chars().count() > 200);
-    if too_long {
-        return Err("Die Frage ist zu lang.".into());
-    }
-    let q = import::fix(import::Question { kind, prompt, options, answer, why }, false).ok_or(
-        "So geht die Frage nicht: Sie braucht mindestens 8 Zeichen, die richtige Antwort muss unter den Optionen stehen, \
-         Multiple Choice braucht 4 verschiedene Optionen und ein Lückentext genau eine Lücke ___.",
-    )?;
+    let (unit_id, kind, figure): (i64, String, Option<i64>) =
+        conn.query_row("SELECT unit_id, kind, figure_id FROM questions WHERE id = ?1", [question_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(err)?;
+    i.figure_id = i.figure_id.or(figure);
+    let (q, figure) = checked(&conn, unit_id, kind, i)?;
     conn.execute(
-        "UPDATE questions SET prompt = ?1, options = ?2, answer = ?3, why = ?4 WHERE id = ?5",
-        params![q.prompt, serde_json::to_string(&q.options).map_err(err)?, q.answer, q.why, question_id],
+        "UPDATE questions SET prompt = ?1, options = ?2, answer = ?3, why = ?4, groups = ?5, spots = ?6, figure_id = ?7 WHERE id = ?8",
+        params![
+            q.prompt,
+            serde_json::to_string(&q.options).map_err(err)?,
+            q.answer,
+            q.why,
+            serde_json::to_string(&q.groups).map_err(err)?,
+            serde_json::to_string(&q.spots).map_err(err)?,
+            figure,
+            question_id
+        ],
     )
     .map_err(err)?;
     questions_where(&conn, who, "q.id = ?1", question_id)?.pop().ok_or_else(|| DENIED.into())
+}
+
+/// Neue Aufgabe in einer Einheit. Mitglieder dürfen das wie Bearbeiten; sie gilt für alle im Kurs.
+fn create_question(c: &Core, who: &Who, unit_id: i64, kind: String, i: QuestionIn) -> R<QuestionOut> {
+    let conn = c.db.lock().unwrap();
+    unit_role(&conn, who, unit_id)?;
+    let (q, figure) = checked(&conn, unit_id, kind, i)?;
+    let level: i64 = conn.query_row("SELECT MAX(q_level, 1) FROM units WHERE id = ?1", [unit_id], |r| r.get(0)).map_err(err)?;
+    let id = import::insert_question(&conn, unit_id, &q, level, figure).map_err(err)?;
+    questions_where(&conn, who, "q.id = ?1", id)?.pop().ok_or_else(|| DENIED.into())
 }
 
 #[cfg(test)]
@@ -857,11 +1094,14 @@ mod tests {
         db::open(&path).unwrap(); // zweites Öffnen: keine erneute Migration
     }
 
+    const PNG: &str = "data:image/png;base64,iVBORw0KGgo=";
+
     #[test]
     fn foreign_course_is_denied() {
         let dir = tmp("denied");
         let c = core(&dir);
         let (course, unit, q, _) = seed(&c);
+        c.db.lock().unwrap().execute("INSERT INTO figures(id, unit_id, page, image) VALUES(50, ?1, 1, ?2)", params![unit, PNG]).unwrap();
         for (cmd, v) in [
             ("course_path", serde_json::json!({ "courseId": course })),
             ("unit", serde_json::json!({ "unitId": unit })),
@@ -871,6 +1111,11 @@ mod tests {
             ("hide_question", serde_json::json!({ "questionId": q, "hidden": true })),
             ("unit_questions", serde_json::json!({ "unitId": unit })),
             ("unit", serde_json::json!({ "unitId": 99999 })),
+            ("create_question", serde_json::json!({ "unitId": unit, "kind": "order", "prompt": "Bringe in Reihenfolge", "options": ["a", "b", "c"] })),
+            ("figure", serde_json::json!({ "figureId": 50 })),
+            ("figure", serde_json::json!({ "figureId": 99999 })),
+            ("unit_figures", serde_json::json!({ "unitId": unit })),
+            ("import_figures", serde_json::json!({ "documentId": 20, "figures": [] })),
         ] {
             assert_eq!(run(&c, &U2, cmd, v).unwrap_err(), DENIED, "{cmd}");
         }
@@ -907,6 +1152,88 @@ mod tests {
 
         // Ungültige Bearbeitung wird abgelehnt
         assert!(run(&c, &U2, "update_question", serde_json::json!({ "questionId": 41, "prompt": "Achse?", "options": ["Preis"], "answer": "Preis", "why": "" })).is_err());
+    }
+
+    #[test]
+    fn structured_lesson() {
+        use serde_json::json;
+        let dir = tmp("structured");
+        let c = core(&dir);
+        let (course, unit, _, _) = seed(&c);
+        run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "examDate": null, "shared": true })).unwrap();
+
+        // Ein Mitglied legt Aufgaben an (gilt für alle im Kurs)
+        let mk = |v: Value| run(&c, &U2, "create_question", v).unwrap()["id"].as_i64().unwrap();
+        let sort = mk(json!({ "unitId": unit, "kind": "sort", "prompt": "Ordne die Aussagen der SWOT zu.", "options": ["Das Wetter ist schön"],
+            "groups": [{ "name": "Stärken", "items": ["Treue Kunden"] }, { "name": "Risiken", "items": ["Neue Konkurrenz", "Hohe Mieten"] }] }));
+        let cloze = mk(json!({ "unitId": unit, "kind": "cloze", "prompt": "Die [Nachfrage] sinkt, wenn der [Preis] steigt.", "options": ["Angebot"] }));
+        let order = mk(json!({ "unitId": unit, "kind": "order", "prompt": "Bringe die Schritte in Reihenfolge.", "options": ["Ziel", "Intern", "Extern", "Strategie"] }));
+        let spots = json!([{ "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.1, "label": "Wurzel" }, { "x": 0.5, "y": 0.1, "w": 0.2, "h": 0.1, "label": "Blatt" }, { "x": 0.1, "y": 0.6, "w": 0.2, "h": 0.1, "label": "Stängel" }]);
+        let label = mk(json!({ "unitId": unit, "kind": "label", "prompt": "Beschrifte die Pflanze.", "image": PNG, "spots": spots }));
+        let bad = |v: Value| assert!(run(&c, &U2, "create_question", v).is_err());
+        bad(json!({ "unitId": unit, "kind": "label", "prompt": "Beschrifte die Pflanze.", "image": "data:text/html;base64,PGI+", "spots": spots }));
+        bad(json!({ "unitId": unit, "kind": "label", "prompt": "Beschrifte die Pflanze.", "figureId": 99999, "spots": spots }));
+        bad(json!({ "unitId": unit, "kind": "essay", "prompt": "Schreib einen Aufsatz." }));
+
+        // In der Lektion steht keine Lösung
+        let l = run(&c, &crate::LOCAL, "start_lesson", json!({ "unitId": unit })).unwrap();
+        let ex = |id: i64| l["exercises"].as_array().unwrap().iter().find(|e| e["id"] == id).unwrap().clone();
+        let e = ex(cloze);
+        assert_eq!(e["prompt"], "Die ___ sinkt, wenn der ___ steigt.");
+        assert_eq!(e["options"].as_array().unwrap().len(), 3);
+        let e = ex(label);
+        assert!(e["image"].as_str().unwrap().starts_with("data:image/png") && e["spots"].as_array().unwrap().len() == 3);
+        assert!(!e["spots"].to_string().contains("Wurzel"));
+        let e = ex(sort);
+        assert_eq!((e["groups"].clone(), e["options"].as_array().unwrap().len()), (json!(["Stärken", "Risiken"]), 4));
+        assert_ne!(ex(order)["options"], json!(["Ziel", "Intern", "Extern", "Strategie"]));
+
+        // Bewertung je Teil
+        let grade = |id: i64, given: Value| run(&c, &crate::LOCAL, "answer", json!({ "questionId": id, "given": given.to_string(), "retry": true })).unwrap();
+        let a = grade(sort, json!({ "Stärken": ["Treue Kunden"], "Risiken": ["Neue Konkurrenz", "hohe mieten"] }));
+        assert_eq!((a["correct"].clone(), a["solution"][1]["name"].clone()), (json!(true), json!("Risiken")));
+        assert_eq!(grade(sort, json!({ "Stärken": ["Treue Kunden", "Das Wetter ist schön"], "Risiken": ["Neue Konkurrenz", "Hohe Mieten"] }))["correct"], false);
+        assert_eq!(grade(cloze, json!(["nachfrage", "Preis"]))["correct"], true);
+        assert_eq!(grade(cloze, json!(["Preis", "Nachfrage"]))["correct"], false);
+        assert_eq!(grade(order, json!(["Ziel", "Intern", "Extern", "Strategie"]))["correct"], true);
+        assert_eq!(grade(order, json!(["Intern", "Ziel", "Extern", "Strategie"]))["correct"], false);
+        assert_eq!(grade(label, json!(["Wurzel", "Blatt", "Stängel"]))["solution"], json!(["Wurzel", "Blatt", "Stängel"]));
+        assert_eq!(grade(label, json!(["Wurzel", "Blatt", "Stängel"]))["correct"], true);
+        assert_eq!(run(&c, &crate::LOCAL, "answer", json!({ "questionId": order, "given": "kaputt", "retry": true })).unwrap()["correct"], false);
+
+        // Bearbeiten ohne neues Bild behält die Grafik
+        let saved = run(&c, &U2, "update_question", json!({ "questionId": label, "prompt": "Beschrifte die Teile der Pflanze.", "spots": spots })).unwrap();
+        assert!(saved["figure_id"].as_i64().is_some());
+        assert_eq!(saved["answer"], "1 Wurzel · 2 Blatt · 3 Stängel");
+    }
+
+    #[test]
+    fn figures_from_pdf() {
+        use serde_json::json;
+        let dir = tmp("figures");
+        let c = core(&dir);
+        let (_, unit, _, _) = seed(&c);
+        c.db.lock().unwrap()
+            .execute_batch("INSERT INTO units(id, course_id, document_id, idx, page_from, page_to, title, source_text, status) VALUES(31, 10, 20, 1, 4, 6, 'Blatt', 'Text', 'ready');")
+            .unwrap();
+        let spot = |x: f64, label: &str| json!({ "x": x, "y": 0.2, "w": 0.15, "h": 0.08, "label": label });
+        let figures = json!([
+            { "page": 5, "title": "Aufbau eines Blattes", "image": PNG, "spots": [spot(0.1, "Blattader"), spot(0.4, "Blattstiel"), spot(0.7, "Blattrand")] },
+            { "page": 2, "image": PNG, "spots": [] },
+            { "page": 9, "image": "data:text/html;base64,PGI+", "spots": [] }
+        ]);
+        let r = run(&c, &crate::LOCAL, "import_figures", json!({ "documentId": 20, "figures": figures })).unwrap();
+        assert_eq!(r["figures"], 2);
+        let figs = |u: i64| run(&c, &crate::LOCAL, "unit_figures", json!({ "unitId": u })).unwrap().as_array().unwrap().len();
+        assert_eq!((figs(unit), figs(31)), (1, 1));
+        let qs = run(&c, &crate::LOCAL, "unit_questions", json!({ "unitId": 31 })).unwrap();
+        assert_eq!(qs[0]["prompt"], "Beschrifte die Grafik „Aufbau eines Blattes“.");
+        assert_eq!(qs[0]["kind"], "label");
+        // Einheit mit nur Grafik-Aufgaben: Lektion läuft, KI-Fragen werden trotzdem bestellt
+        let l = run(&c, &crate::LOCAL, "start_lesson", json!({ "unitId": 31 })).unwrap();
+        assert_eq!(l["exercises"][0]["kind"], "label");
+        let q_state: i64 = c.db.lock().unwrap().query_row("SELECT q_state FROM units WHERE id = 31", [], |r| r.get(0)).unwrap();
+        assert_eq!(q_state, 1);
     }
 
     #[test]

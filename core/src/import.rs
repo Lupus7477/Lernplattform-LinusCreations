@@ -1,15 +1,19 @@
 //! Import: PDF-Seiten → Abschnitte → Einheiten (Titel, Zusammenfassung, Begriffe) → Übungsfragen.
+//! Dazu Strukturaufgaben (Matrix, Reihenfolge, Lücken) mit Selbstprüfung der KI und Grafiken zum Beschriften.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use rusqlite::params;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 use crate::ai::{Ai, AiError, Gen, Msg};
 use crate::db::{self, Db, Task};
-use crate::learn::normalize;
+use crate::learn::{self, normalize, Group, Spot};
 
 /// ~5000 Zeichen ≈ 1600 Tokens: passt mit Prompt und Antwort sicher in 4096 Kontext.
 pub const SECTION_CHARS: usize = 5000;
@@ -96,18 +100,31 @@ pub struct Term {
     pub definition: String,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+/// Eine Aufgabe in Speicherform. `groups` nur bei `sort`, `spots` nur bei `label`.
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Question {
     pub kind: String,
     pub prompt: String,
+    #[serde(default)]
     pub options: Vec<String>,
+    #[serde(default)]
     pub answer: String,
+    #[serde(default)]
     pub why: String,
+    #[serde(default)]
+    pub groups: Vec<Group>,
+    #[serde(default)]
+    pub spots: Vec<Spot>,
 }
 
 #[derive(Deserialize)]
 struct Questions {
     questions: Vec<Question>,
+}
+
+#[derive(Deserialize)]
+struct Tasks {
+    tasks: Vec<Question>,
 }
 
 const UNIT_SCHEMA: &str = r#"{"type":"object","properties":{
@@ -126,6 +143,18 @@ const QUESTION_SCHEMA: &str = r#"{"type":"object","properties":{
    "why":{"type":"string"}},
   "required":["kind","prompt","options","answer","why"]}}},
  "required":["questions"]}"#;
+
+/// Strukturaufgaben in derselben Form wie die Speicherung (siehe `fix`).
+const TASK_SCHEMA: &str = r#"{"type":"object","properties":{
+ "tasks":{"type":"array","minItems":1,"maxItems":2,"items":{"type":"object","properties":{
+   "kind":{"enum":["sort","order","cloze"]},
+   "prompt":{"type":"string"},
+   "groups":{"type":"array","maxItems":4,"items":{"type":"object","properties":{
+     "name":{"type":"string"},"items":{"type":"array","minItems":1,"maxItems":3,"items":{"type":"string"}}},"required":["name","items"]}},
+   "options":{"type":"array","maxItems":6,"items":{"type":"string"}},
+   "why":{"type":"string"}},
+  "required":["kind","prompt","groups","options","why"]}}},
+ "required":["tasks"]}"#;
 
 fn grammar(cell: &'static OnceLock<String>, schema: &str) -> &'static str {
     cell.get_or_init(|| llama_cpp_2::json_schema_to_grammar(schema).expect("gültiges JSON-Schema"))
@@ -151,11 +180,7 @@ pub fn analyze(ai: &Ai, text: &str) -> Result<UnitInfo, AiError> {
 
 pub fn generate_questions(ai: &Ai, text: &str, level: i64) -> Result<Vec<Question>, AiError> {
     static G: OnceLock<String> = OnceLock::new();
-    let focus = match level {
-        1 => "Grundbegriffe und Definitionen",
-        2 => "Zusammenhänge und Abläufe",
-        _ => "Anwendung auf neue Beispiele und typische Denkfehler",
-    };
+    let focus = focus(level);
     let user = format!(
         "Lernmaterial:\n<<<\n{text}\n>>>\n\n\
          Erstelle 8 Übungsfragen zu diesem Material. Schwerpunkt: {focus}.\n\
@@ -172,6 +197,135 @@ pub fn generate_questions(ai: &Ai, text: &str, level: i64) -> Result<Vec<Questio
     )?;
     let parsed: Questions = serde_json::from_str(&raw).map_err(|e| AiError::Failed(format!("Antwort unlesbar: {e}")))?;
     Ok(validate(parsed.questions))
+}
+
+fn focus(level: i64) -> &'static str {
+    match level {
+        1 => "Grundbegriffe und Definitionen",
+        2 => "Zusammenhänge und Abläufe",
+        _ => "Anwendung auf neue Beispiele und typische Denkfehler",
+    }
+}
+
+/// 1–2 Aufgaben, deren Art die KI nach dem Inhalt wählt. Eine Matrix nur, wenn ihre Felder im Material stehen.
+pub fn generate_tasks(ai: &Ai, text: &str, level: i64) -> Result<Vec<Question>, AiError> {
+    static G: OnceLock<String> = OnceLock::new();
+    let scenario = if level >= 2 {
+        "\nBei sort: Wende die Kategorien auf ein neues, konkretes Beispiel an (etwa ein Café, ein Fahrradladen oder eine App). \
+         prompt beschreibt das Beispiel in 1 bis 2 Sätzen und sagt, was zu tun ist. items sind Aussagen über dieses Beispiel, \
+         options = 1 bis 2 Aussagen über das Beispiel, die in keine Kategorie gehören."
+    } else {
+        ""
+    };
+    let user = format!(
+        "Lernmaterial:\n<<<\n{text}\n>>>\n\n\
+         Erstelle 2 Übungsaufgaben verschiedener Art, die zur Struktur dieses Materials passen. Schwerpunkt: {}.\n\
+         Teilt das Material Dinge in feste Kategorien ein, ist eine davon sort. Beschreibt es einen Ablauf, ist eine davon order.\n\
+         - sort: NUR wenn das Material selbst Dinge in feste Kategorien einteilt (z. B. SWOT-Analyse: Stärken, Schwächen, Chancen, Risiken). \
+         groups = 2 bis 4 Kategorien, name genau wie im Material, items = je 1 bis 3 kurze Aussagen (höchstens 8 Wörter). \
+         options = 0 bis 2 Aussagen, die in keine Kategorie gehören. prompt = kurze Arbeitsanweisung.\n\
+         - order: NUR wenn das Material einen Ablauf, Phasen oder Schritte beschreibt. options = 3 bis 6 Schritte in der richtigen Reihenfolge, \
+         je höchstens 8 Wörter, ohne Nummern. groups = [].\n\
+         - cloze: sonst. prompt = 1 bis 3 Sätze zum Inhalt, in denen 2 bis 4 Fachbegriffe in eckigen Klammern stehen, \
+         z. B. „Die [Nachfrage] sinkt, wenn der [Preis] steigt.“ options = 2 bis 3 ähnliche, aber falsche Begriffe. groups = [].{scenario}\n\
+         why = ein kurzer Satz, worauf es ankommt. Keine Verweise auf Seiten, Kapitel, Folien oder das Skript.",
+        focus(level)
+    );
+    let raw = ai.generate(
+        Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(grammar(&G, TASK_SCHEMA)), max_tokens: 900, temperature: 0.4 },
+        |_| {},
+    )?;
+    let parsed: Tasks = serde_json::from_str(&raw).map_err(|e| AiError::Failed(format!("Antwort unlesbar: {e}")))?;
+    Ok(parsed.tasks.into_iter().filter_map(|q| fix(q, true)).filter(|q| q.kind != "sort" || grounded(q, text)).collect())
+}
+
+/// Feldnamen müssen im Material stehen, sonst hat die KI ein Raster erfunden.
+// ponytail: Wortstamm = erstes Wort ohne die letzten 2 Zeichen („Stärken“ findet „Stärke“). Echte Lemmatisierung, falls zu oft daneben.
+fn grounded(q: &Question, text: &str) -> bool {
+    let hay = normalize(text);
+    q.groups.iter().all(|g| {
+        let first = normalize(&g.name).split(' ').next().unwrap_or("").to_string();
+        let stem: String = first.chars().take(first.chars().count().saturating_sub(2).max(4)).collect();
+        !stem.is_empty() && hay.contains(&stem)
+    })
+}
+
+/// JSON-Antwort mit einer Grammatik, die erst zur Laufzeit feststeht (Enums aus der Aufgabe).
+fn ask_json<T: DeserializeOwned>(ai: &Ai, user: String, schema: &Value, max_tokens: usize) -> Result<T, AiError> {
+    let g = llama_cpp_2::json_schema_to_grammar(&schema.to_string()).map_err(|e| AiError::Failed(format!("Grammatik: {e}")))?;
+    let raw = ai.generate(
+        Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(&g), max_tokens, temperature: 0.1 },
+        |_| {},
+    )?;
+    serde_json::from_str(&raw).map_err(|e| AiError::Failed(format!("Antwort unlesbar: {e}")))
+}
+
+/// Selbstprüfung: Die KI löst ihre Aufgabe ein zweites Mal, ohne die Lösung zu sehen.
+/// Matrix: nur übereinstimmende Aussagen bleiben. Reihenfolge und Lücken: jede Abweichung verwirft die Aufgabe.
+pub fn verify_task(ai: &Ai, text: &str, q: Question) -> Result<Option<Question>, AiError> {
+    let mut rng = learn::Shuffler::new();
+    let material = format!("Lernmaterial:\n<<<\n{text}\n>>>\n\nAufgabe: {}\n", q.prompt);
+    let list = |v: &[String]| v.iter().map(|x| format!("- {x}")).collect::<Vec<_>>().join("\n");
+    match q.kind.as_str() {
+        "sort" => {
+            let mut items: Vec<String> = q.groups.iter().flat_map(|g| g.items.clone()).chain(q.options.clone()).collect();
+            rng.shuffle(&mut items);
+            let mut names: Vec<String> = q.groups.iter().map(|g| g.name.clone()).collect();
+            let fields = names.join(", ");
+            names.push("keins".into());
+            let schema = json!({"type": "object", "required": ["assign"], "properties": {"assign": {"type": "array", "minItems": items.len(), "maxItems": items.len(),
+                "items": {"type": "object", "required": ["item", "group"], "properties": {"item": {"enum": items}, "group": {"enum": names}}}}}});
+            #[derive(Deserialize)]
+            struct A {
+                item: String,
+                group: String,
+            }
+            #[derive(Deserialize)]
+            struct R {
+                assign: Vec<A>,
+            }
+            let user = format!("{material}Kategorien: {fields}\nOrdne jede Aussage genau einer Kategorie zu, oder „keins“, wenn sie in keine passt:\n{}", list(&items));
+            let r: R = ask_json(ai, user, &schema, 60 + 40 * items.len())?;
+            let said: HashMap<String, String> = r.assign.into_iter().map(|a| (a.item, a.group)).collect();
+            let mut q = q;
+            for g in &mut q.groups {
+                let name = g.name.clone();
+                g.items.retain(|i| said.get(i) == Some(&name));
+            }
+            q.options.retain(|o| said.get(o).is_some_and(|g| g == "keins"));
+            Ok(fix(q, true))
+        }
+        "order" => {
+            let mut steps = q.options.clone();
+            while steps == q.options {
+                rng.shuffle(&mut steps);
+            }
+            let schema = json!({"type": "object", "required": ["order"], "properties": {"order": {"type": "array", "minItems": steps.len(), "maxItems": steps.len(), "items": {"enum": steps}}}});
+            #[derive(Deserialize)]
+            struct R {
+                order: Vec<String>,
+            }
+            let user = format!("{material}Bringe diese Schritte in die richtige Reihenfolge:\n{}", list(&steps));
+            let r: R = ask_json(ai, user, &schema, 40 + 30 * steps.len())?;
+            Ok((r.order == q.options).then_some(q))
+        }
+        "cloze" => {
+            let (gapped, gaps) = learn::cloze_parts(&q.prompt);
+            let mut bank: Vec<String> = gaps.iter().chain(&q.options).cloned().collect::<HashSet<_>>().into_iter().collect();
+            rng.shuffle(&mut bank);
+            let mut n = 0;
+            let numbered = gapped.split("___").enumerate().map(|(i, part)| if i == 0 { part.to_string() } else { n += 1; format!("({n}) ___{part}") }).collect::<String>();
+            let schema = json!({"type": "object", "required": ["gaps"], "properties": {"gaps": {"type": "array", "minItems": gaps.len(), "maxItems": gaps.len(), "items": {"enum": bank}}}});
+            #[derive(Deserialize)]
+            struct R {
+                gaps: Vec<String>,
+            }
+            let user = format!("Lernmaterial:\n<<<\n{text}\n>>>\n\nText mit Lücken: {numbered}\nWörter: {}\nGib für jede Lücke der Reihe nach das passende Wort an.", bank.join(", "));
+            let r: R = ask_json(ai, user, &schema, 40 + 20 * gaps.len())?;
+            Ok((learn::seq_mistakes(&gaps, &r.gaps) == 0).then_some(q))
+        }
+        _ => Ok(Some(q)),
+    }
 }
 
 // ---------- Qualitätsfilter im Code statt langer Prompt-Regeln ----------
@@ -196,20 +350,26 @@ pub fn validate(qs: Vec<Question>) -> Vec<Question> {
 }
 
 /// Bringt eine Frage in Form oder verwirft sie. `strict` = KI-Ausgabe; Nutzer-Bearbeitungen prüfen nur die Form.
+/// Bei den Strukturaufgaben schreibt `fix` auch die lesbare `answer` („Stärken: a, b · Risiken: c“).
 pub fn fix(mut q: Question, strict: bool) -> Option<Question> {
+    let trim = |v: &[String]| v.iter().map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect::<Vec<_>>();
     q.prompt = q.prompt.trim().to_string();
     q.answer = q.answer.trim().to_string();
     q.why = q.why.trim().to_string();
-    q.options = q.options.iter().map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect();
-    let all = format!("{} {} {}", q.prompt, q.answer, q.options.join(" "));
+    q.options = trim(&q.options);
+    let groups: Vec<Group> = std::mem::take(&mut q.groups).into_iter().map(|g| Group { name: g.name.trim().to_string(), items: trim(&g.items) }).collect();
+    let mut spots = std::mem::take(&mut q.spots);
+    let all = format!("{} {} {} {}", q.prompt, q.answer, q.options.join(" "), groups.iter().map(|g| format!("{} {}", g.name, g.items.join(" "))).collect::<Vec<_>>().join(" "));
     let w = words(&all);
     if q.prompt.chars().count() < 8 || strict && w.iter().any(|x| BANNED_WORDS.contains(&x.as_str())) {
         return None;
     }
-    // „Was ist X und welche Arten gibt es?“ = zwei Fragen in einer
-    if strict && words(&q.prompt).iter().filter(|x| ASKS.contains(&x.as_str())).count() >= 2 {
+    // „Was ist X und welche Arten gibt es?“ = zwei Fragen in einer. Nur bei echten Fragen, Lückentext-Prosa enthält oft „wie“.
+    let classic = matches!(q.kind.as_str(), "mc" | "true_false" | "fill_blank");
+    if strict && classic && words(&q.prompt).iter().filter(|x| ASKS.contains(&x.as_str())).count() >= 2 {
         return None;
     }
+    let mut seen = HashSet::new();
     match q.kind.as_str() {
         "true_false" => {
             q.answer = match normalize(&q.answer).as_str() {
@@ -239,9 +399,86 @@ pub fn fix(mut q: Question, strict: bool) -> Option<Question> {
                 q.options[3] = q.answer.clone();
             }
         }
+        // Felder mit Aussagen; options = Ablenker, die nirgends hingehören
+        "sort" => {
+            let mut names = HashSet::new();
+            for g in groups {
+                if g.name.is_empty() || !names.insert(normalize(&g.name)) {
+                    continue;
+                }
+                let items: Vec<String> = g.items.into_iter().filter(|i| i.chars().count() <= 160 && seen.insert(normalize(i))).collect();
+                if !items.is_empty() {
+                    q.groups.push(Group { name: g.name, items });
+                }
+            }
+            q.options.retain(|o| seen.insert(normalize(o)));
+            q.options.truncate(4);
+            let n: usize = q.groups.iter().map(|g| g.items.len()).sum();
+            if !(2..=4).contains(&q.groups.len()) || !(3..=12).contains(&n) {
+                return None;
+            }
+            q.answer = q.groups.iter().map(|g| format!("{}: {}", g.name, g.items.join(", "))).collect::<Vec<_>>().join(" · ");
+        }
+        // options = Schritte in der richtigen Reihenfolge; Nummern („1. …“) würden sie verraten
+        "order" => {
+            q.options = q.options.iter().map(|o| strip_number(o)).filter(|o| !o.is_empty()).collect();
+            q.options.retain(|o| seen.insert(normalize(o)));
+            if !(3..=7).contains(&q.options.len()) {
+                return None;
+            }
+            q.answer = q.options.join(" → ");
+        }
+        // Lücken in [Klammern] im Text; options = Ablenker
+        "cloze" => {
+            // „__[Polypol]__“ → „[Polypol]“: die KI markiert Lücken gern doppelt
+            while q.prompt.contains("_[") || q.prompt.contains("]_") {
+                q.prompt = q.prompt.replace("_[", "[").replace("]_", "]");
+            }
+            let (text, gaps) = learn::cloze_parts(&q.prompt);
+            if text.contains(['[', ']']) || !(1..=5).contains(&gaps.len()) || gaps.iter().any(|g| g.is_empty() || g.chars().count() > 60) {
+                return None;
+            }
+            seen.extend(gaps.iter().map(|g| normalize(g)));
+            q.options.retain(|o| seen.insert(normalize(o)));
+            q.options.truncate(5);
+            q.answer = gaps.join(" · ");
+        }
+        // Stellen im Bild (0–1); options = Ablenker
+        "label" => {
+            for s in &mut spots {
+                s.label = s.label.trim().to_string();
+            }
+            let ok = |s: &Spot| {
+                [s.x, s.y, s.w, s.h].iter().all(|v| v.is_finite() && *v >= 0.0)
+                    && s.w > 0.005
+                    && s.h > 0.005
+                    && s.x + s.w <= 1.001
+                    && s.y + s.h <= 1.001
+                    && (1..=60).contains(&s.label.chars().count())
+            };
+            if !(1..=12).contains(&spots.len()) || !spots.iter().all(ok) {
+                return None;
+            }
+            seen.extend(spots.iter().map(|s| normalize(&s.label)));
+            q.options.retain(|o| seen.insert(normalize(o)));
+            q.options.truncate(5);
+            q.answer = spots.iter().enumerate().map(|(i, s)| format!("{} {}", i + 1, s.label)).collect::<Vec<_>>().join(" · ");
+            q.spots = spots;
+        }
         _ => return None,
     }
     Some(q)
+}
+
+/// „1. Ziel festlegen“, „Schritt 2: …“, „- …“ → nur der Schritt.
+fn strip_number(s: &str) -> String {
+    let t = s.trim().trim_start_matches(['-', '•', '*', ' ']);
+    let t = t.strip_prefix("Schritt ").unwrap_or(t);
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    match t[digits..].strip_prefix(['.', ')', ':']) {
+        Some(rest) if digits > 0 => rest.trim().to_string(),
+        _ => s.trim().trim_start_matches(['-', '•', '*', ' ']).to_string(),
+    }
 }
 
 /// Lücke vereinheitlichen: genau eine Folge aus ≥2 Unterstrichen → „___“, sonst ungültig.
@@ -271,7 +508,7 @@ pub fn spawn_worker(db: Db, ai: Arc<Ai>, wake: Receiver<()>, notify: impl Fn(i64
             Task::Analyze { unit_id, .. } => format!("Analyse Einheit {unit_id}"),
             Task::Questions { unit_id, level, .. } => format!("Fragen Einheit {unit_id} (Stufe {level})"),
         };
-        match run_task(&db, &ai, task) {
+        match run_task(&db, &ai, task, &notify) {
             Ok(course_id) => {
                 eprintln!("[import] {what}: {:.1} s", started.elapsed().as_secs_f32());
                 notify(course_id);
@@ -288,7 +525,7 @@ pub fn spawn_worker(db: Db, ai: Arc<Ai>, wake: Receiver<()>, notify: impl Fn(i64
     });
 }
 
-fn run_task(db: &Db, ai: &Ai, task: Task) -> Result<i64, AiError> {
+fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, AiError> {
     match task {
         Task::Analyze { unit_id, course_id, idx, page_from, page_to, text } => {
             let info = match analyze(ai, &text) {
@@ -329,35 +566,125 @@ fn run_task(db: &Db, ai: &Ai, task: Task) -> Result<i64, AiError> {
         }
         Task::Questions { unit_id, level, text } => {
             let result = generate_questions(ai, &text, level);
-            let conn = db.lock().unwrap();
-            let course_id: i64 = conn.query_row("SELECT course_id FROM units WHERE id = ?1", [unit_id], |r| r.get(0)).unwrap_or(0);
-            match result {
-                Ok(qs) if qs.len() >= 3 => {
-                    for q in &qs {
-                        let _ = conn.execute(
-                            "INSERT INTO questions(unit_id, kind, prompt, options, answer, why, level) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            params![unit_id, q.kind, q.prompt, serde_json::to_string(&q.options).unwrap(), q.answer, q.why, level],
-                        );
+            let course_id = {
+                let conn = db.lock().unwrap();
+                let course_id: i64 = conn.query_row("SELECT course_id FROM units WHERE id = ?1", [unit_id], |r| r.get(0)).unwrap_or(0);
+                match result {
+                    Ok(qs) if qs.len() >= 3 => {
+                        for q in &qs {
+                            let _ = insert_question(&conn, unit_id, q, level, None);
+                        }
+                        let _ = conn.execute("UPDATE units SET q_state = 2, q_level = ?1 WHERE id = ?2", params![level, unit_id]);
+                        course_id
                     }
-                    let _ = conn.execute("UPDATE units SET q_state = 2, q_level = ?1 WHERE id = ?2", params![level, unit_id]);
-                    Ok(course_id)
-                }
-                Err(AiError::NotReady) => Err(AiError::NotReady),
-                other => {
-                    let _ = conn.execute("UPDATE units SET q_state = 3 WHERE id = ?1", [unit_id]);
-                    drop(conn);
-                    match other {
-                        Err(e) => Err(e),
-                        Ok(qs) => Err(AiError::Failed(format!("nur {} brauchbare Fragen für Einheit {unit_id}", qs.len()))),
+                    Err(AiError::NotReady) => return Err(AiError::NotReady),
+                    other => {
+                        let _ = conn.execute("UPDATE units SET q_state = 3 WHERE id = ?1", [unit_id]);
+                        return match other {
+                            Err(e) => Err(e),
+                            Ok(qs) => Err(AiError::Failed(format!("nur {} brauchbare Fragen für Einheit {unit_id}", qs.len()))),
+                        };
                     }
                 }
+            };
+            // Die Lektion kann schon starten; Strukturaufgaben kommen ohne Datenbank-Sperre hinterher.
+            notify(course_id);
+            let mut tasks = Vec::new();
+            match generate_tasks(ai, &text, level) {
+                Ok(ts) => {
+                    for t in ts {
+                        let prompt = t.prompt.clone();
+                        match verify_task(ai, &text, t) {
+                            Ok(Some(v)) => tasks.push(v),
+                            Ok(None) => eprintln!("[import] Selbstprüfung verworfen: {prompt}"),
+                            Err(e) => eprintln!("[import] Selbstprüfung Einheit {unit_id}: {e}"),
+                        }
+                    }
+                }
+                Err(e) => eprintln!("[import] Strukturaufgaben Einheit {unit_id}: {e}"),
             }
+            let conn = db.lock().unwrap();
+            for t in &tasks {
+                let _ = insert_question(&conn, unit_id, t, level, None);
+            }
+            Ok(course_id)
         }
     }
 }
 
+pub fn insert_question(conn: &Connection, unit_id: i64, q: &Question, level: i64, figure_id: Option<i64>) -> rusqlite::Result<i64> {
+    let (options, groups, spots) = (serde_json::to_string(&q.options).unwrap(), serde_json::to_string(&q.groups).unwrap(), serde_json::to_string(&q.spots).unwrap());
+    conn.execute(
+        "INSERT INTO questions(unit_id, kind, prompt, options, answer, why, level, groups, spots, figure_id) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![unit_id, q.kind, q.prompt, options, q.answer, q.why, level, groups, spots, figure_id],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+// ---------- Grafiken aus dem PDF ----------
+
+/// Eine Grafik, wie sie die Oberfläche beim Einlesen findet: Ausschnitt mit übermalten Beschriftungen und deren Stellen.
+#[derive(Deserialize)]
+pub struct FigureIn {
+    pub page: i64,
+    #[serde(default)]
+    pub title: String,
+    pub image: String,
+    #[serde(default)]
+    pub spots: Vec<Spot>,
+}
+
+pub const MAX_FIGURES: usize = 30;
+const MAX_IMAGE: usize = 2_000_000;
+
+/// Nur Rasterbilder als data:-URL mit gültigem Base64 (kein SVG, kein HTML).
+pub fn valid_image(s: &str) -> bool {
+    s.len() <= MAX_IMAGE
+        && ["data:image/jpeg;base64,", "data:image/png;base64,", "data:image/webp;base64,"]
+            .iter()
+            .filter_map(|p| s.strip_prefix(p))
+            .any(|b64| !b64.is_empty() && b64.bytes().all(|c| c.is_ascii_alphanumeric() || b"+/=".contains(&c)))
+}
+
+/// Grafiken eines Dokuments der passenden Einheit zuordnen (Seite liegt darin oder am nächsten dran).
+/// Ab 3 Beschriftungen entsteht direkt eine Beschriftungsaufgabe, Ablenker kommen aus den anderen Grafiken.
+pub fn store_figures(conn: &Connection, document_id: i64, figures: &[FigureIn]) -> rusqlite::Result<usize> {
+    let mut rng = learn::Shuffler::new();
+    let mut stored = 0;
+    for (i, f) in figures.iter().take(MAX_FIGURES).enumerate() {
+        if !valid_image(&f.image) {
+            continue;
+        }
+        let unit: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM units WHERE document_id = ?1
+                 ORDER BY MAX(page_from - ?2, 0) + MAX(?2 - page_to, 0), idx LIMIT 1",
+                params![document_id, f.page],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(unit_id) = unit else { continue };
+        conn.execute("INSERT INTO figures(unit_id, page, image) VALUES(?1, ?2, ?3)", params![unit_id, f.page, f.image])?;
+        let figure_id = conn.last_insert_rowid();
+        stored += 1;
+        if f.spots.len() < 3 {
+            continue;
+        }
+        let mut others: Vec<String> = figures.iter().enumerate().filter(|(j, _)| *j != i).flat_map(|(_, o)| o.spots.iter().map(|s| s.label.clone())).collect();
+        rng.shuffle(&mut others);
+        others.truncate(2);
+        let title: String = f.title.trim().chars().take(80).collect();
+        let prompt = if title.is_empty() { "Beschrifte die Grafik.".to_string() } else { format!("Beschrifte die Grafik „{title}“.") };
+        let q = Question { kind: "label".into(), prompt, options: others, spots: f.spots.clone(), ..Default::default() };
+        if let Some(q) = fix(q, false) {
+            insert_question(conn, unit_id, &q, 1, Some(figure_id))?;
+        }
+    }
+    Ok(stored)
+}
+
 /// Speichert ein neues Dokument und legt pro Abschnitt eine wartende Einheit an.
-pub fn store_document(db: &Db, course_id: i64, name: &str, pages: &[String]) -> rusqlite::Result<(i64, usize)> {
+pub fn store_document(db: &Db, course_id: i64, name: &str, pages: &[String], figures: &[FigureIn]) -> rusqlite::Result<(i64, usize, usize)> {
     let secs = sections(pages, SECTION_CHARS);
     let mut conn = db.lock().unwrap();
     let tx = conn.transaction()?;
@@ -374,8 +701,9 @@ pub fn store_document(db: &Db, course_id: i64, name: &str, pages: &[String]) -> 
         )?;
         idx += 1;
     }
+    let figs = store_figures(&tx, doc_id, figures)?;
     tx.commit()?;
-    Ok((doc_id, secs.len()))
+    Ok((doc_id, secs.len(), figs))
 }
 
 #[cfg(test)]
@@ -383,7 +711,7 @@ mod tests {
     use super::*;
 
     fn q(kind: &str, prompt: &str, options: &[&str], answer: &str) -> Question {
-        Question { kind: kind.into(), prompt: prompt.into(), options: options.iter().map(|s| s.to_string()).collect(), answer: answer.into(), why: "weil".into() }
+        Question { kind: kind.into(), prompt: prompt.into(), options: options.iter().map(|s| s.to_string()).collect(), answer: answer.into(), why: "weil".into(), ..Default::default() }
     }
 
     #[test]
@@ -438,6 +766,60 @@ mod tests {
         }
         assert!(!info.title.is_empty() && info.terms.len() >= 2);
         assert!(qs.len() >= 3, "zu wenige brauchbare Fragen");
+
+        // Strukturaufgaben mit Selbstprüfung: SWOT-Text soll eine Matrix ergeben, Marktformen keine erfundene.
+        for (name, text, level) in [("swot", include_str!("../testdata/swot.txt"), 1), ("swot", include_str!("../testdata/swot.txt"), 2), ("marktformen", text, 1)] {
+            let t = std::time::Instant::now();
+            let tasks = generate_tasks(&ai, text, level).expect("Strukturaufgaben");
+            println!("\nStrukturaufgaben {name} Stufe {level} in {:.1} s", t.elapsed().as_secs_f32());
+            for task in tasks {
+                println!("  [{}] {}\n      {}\n      Ablenker: {:?}", task.kind, task.prompt, task.answer, task.options);
+                let t = std::time::Instant::now();
+                match verify_task(&ai, text, task).expect("Selbstprüfung") {
+                    Some(v) => println!("      geprüft ({:.1} s): {}", t.elapsed().as_secs_f32(), v.answer),
+                    None => println!("      verworfen ({:.1} s)", t.elapsed().as_secs_f32()),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn filters_bad_tasks() {
+        let g = |n: &str, i: &[&str]| Group { name: n.into(), items: i.iter().map(|s| s.to_string()).collect() };
+        let task = |kind: &str, prompt: &str, options: &[&str], groups: Vec<Group>| Question { groups, ..q(kind, prompt, options, "") };
+
+        // Matrix: Dubletten über Felder hinweg und Ablenker, die einer Aussage gleichen, fliegen raus
+        let t = fix(task("sort", "Ordne die Aussagen der SWOT zu.", &["treue kunden", "Schönes Wetter"], vec![g("Stärken", &["Treue Kunden", " "]), g("Risiken", &["Neue Konkurrenz", "treue Kunden", "Hohe Mieten"])]), true).unwrap();
+        assert_eq!(t.groups[1].items, vec!["Neue Konkurrenz", "Hohe Mieten"]);
+        assert_eq!(t.options, vec!["Schönes Wetter"]);
+        assert_eq!(t.answer, "Stärken: Treue Kunden · Risiken: Neue Konkurrenz, Hohe Mieten");
+        assert!(fix(task("sort", "Ordne die Aussagen zu.", &[], vec![g("Stärken", &["a", "b", "c"])]), true).is_none()); // nur ein Feld
+
+        // Verankerung: Felder müssen im Material stehen
+        let swot = "Die SWOT-Analyse stellt jede Stärke und Schwäche des Unternehmens den Chancen und dem Risiko am Markt gegenüber.";
+        assert!(grounded(&task("sort", "x", &[], vec![g("Stärken", &[]), g("Schwächen", &[]), g("Chancen", &[]), g("Risiken", &[])]), swot));
+        assert!(!grounded(&task("sort", "x", &[], vec![g("Stärken", &[]), g("Marktmacht", &[])]), swot));
+
+        // Reihenfolge
+        assert_eq!(fix(task("order", "Bringe die Schritte in Reihenfolge.", &["Ziel", "Analyse", "Strategie"], vec![]), true).unwrap().answer, "Ziel → Analyse → Strategie");
+        assert!(fix(task("order", "Bringe die Schritte in Reihenfolge.", &["Ziel", "ziel", "Analyse"], vec![]), true).is_none());
+        let t = fix(task("order", "Bringe die Schritte in Reihenfolge.", &["1. Ziel festlegen", "Schritt 2: Intern analysieren", "- 3) Strategie"], vec![]), true).unwrap();
+        assert_eq!(t.options, vec!["Ziel festlegen", "Intern analysieren", "Strategie"]);
+
+        // Lückentext: „wie“ zweimal ist Prosa, keine Doppelfrage; Ablenker gleich einer Lücke fliegt raus
+        let t = fix(task("cloze", "Wie gut die [Stärken] sind, zeigt sich, wie die [Konkurrenz] reagiert.", &["stärken", "Kunden"], vec![]), true).unwrap();
+        assert_eq!((t.answer.as_str(), t.options.clone()), ("Stärken · Konkurrenz", vec!["Kunden".to_string()]));
+        assert!(fix(task("cloze", "Ganz ohne Lücke geschrieben.", &[], vec![]), true).is_none());
+        assert_eq!(fix(task("cloze", "Im __[Polypol]__ gibt es viele Anbieter.", &[], vec![]), true).unwrap().prompt, "Im [Polypol] gibt es viele Anbieter.");
+        assert!(fix(task("cloze", "Eine [Lücke und eine offene [Klammer.", &[], vec![]), true).is_none());
+
+        // Grafik: Stellen im Bild, ungültige Koordinaten verwerfen
+        let spot = |x: f64, label: &str| Spot { x, y: 0.1, w: 0.2, h: 0.1, label: label.into() };
+        let t = Question { spots: vec![spot(0.1, " Wurzel "), spot(0.5, "Blatt")], ..q("label", "Beschrifte die Grafik.", &["blatt", "Blüte"], "") };
+        let t = fix(t, false).unwrap();
+        assert_eq!((t.answer.as_str(), t.options.clone()), ("1 Wurzel · 2 Blatt", vec!["Blüte".to_string()]));
+        assert!(fix(Question { spots: vec![spot(0.9, "zu weit rechts")], ..q("label", "Beschrifte die Grafik.", &[], "") }, false).is_none());
+        assert!(valid_image("data:image/png;base64,iVBORw0KGgo=") && !valid_image("data:image/svg+xml;base64,PHN2Zz4=") && !valid_image("data:image/png;base64,<script>"));
     }
 
     #[test]

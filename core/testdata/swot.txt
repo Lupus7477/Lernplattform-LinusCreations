@@ -1,0 +1,12 @@
+Die SWOT-Analyse
+
+Die SWOT-Analyse ist ein Werkzeug der strategischen Planung. Sie verbindet eine interne Analyse des Unternehmens mit einer externen Analyse seiner Umwelt. Der Name setzt sich aus den Anfangsbuchstaben der vier Felder zusammen: Strengths (Stärken), Weaknesses (Schwächen), Opportunities (Chancen) und Threats (Risiken).
+
+Interne Analyse: Stärken und Schwächen
+Stärken und Schwächen liegen im Unternehmen selbst und lassen sich direkt beeinflussen. Eine Stärke ist zum Beispiel gut ausgebildetes Personal, eine bekannte Marke oder eine moderne Produktion. Eine Schwäche ist etwa eine veraltete IT, hohe Kosten oder eine geringe Bekanntheit.
+
+Externe Analyse: Chancen und Risiken
+Chancen und Risiken kommen von außen, aus dem Markt und der Umwelt. Das Unternehmen kann sie nicht steuern, muss aber darauf reagieren. Eine Chance ist zum Beispiel ein wachsender Online-Markt oder eine neue Zielgruppe. Ein Risiko ist etwa neue Konkurrenz, ein strengeres Gesetz oder steigende Rohstoffpreise.
+
+Vorgehen
+Zuerst wird das Ziel der Analyse festgelegt. Danach folgt die interne Analyse der Stärken und Schwächen, anschließend die externe Analyse der Chancen und Risiken. Zum Schluss werden die Felder in der SWOT-Matrix kombiniert und daraus Strategien abgeleitet. Eine SO-Strategie nutzt Stärken, um Chancen zu ergreifen. Eine WT-Strategie baut Schwächen ab, um Risiken zu vermeiden.

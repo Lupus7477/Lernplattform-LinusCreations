@@ -1,6 +1,6 @@
 // Lektion: eine Aufgabe nach der anderen, Prüfen ohne KI, falsche Aufgaben kommen am Ende erneut.
 import { call } from "./api.js";
-import { confetti, confirmSheet, countUp, h, icon, openSheet, reduceMotion, shake, sound, toast } from "./ui.js";
+import { confetti, confirmSheet, countUp, flip, h, icon, openSheet, reduceMotion, shake, sound, toast } from "./ui.js";
 import { emit, state, subscribe } from "./state.js";
 import { editQuestion, openChat } from "./unit.js";
 
@@ -8,8 +8,13 @@ const LABEL = {
   mc: "Wähle die richtige Antwort",
   true_false: "Stimmt das?",
   fill_blank: "Fülle die Lücke",
+  cloze: "Fülle die Lücken",
+  sort: "Ordne zu",
+  order: "Reihenfolge",
+  label: "Grafik beschriften",
   match: "Ordne die Begriffe zu",
 };
+const CLASSIC = ["mc", "true_false", "fill_blank"];
 const PRAISE = ["Richtig!", "Genau so!", "Sitzt!", "Stark!", "Sehr gut!"];
 const norm = (s) => s.trim().toLowerCase();
 
@@ -88,39 +93,288 @@ export function openLesson(unitId, onExit) {
     };
   }
 
-  function blank(ex) {
-    const [pre, ...rest] = ex.prompt.split("___");
-    let chosen = null;
-    const gap = h("button.blank", { type: "button", "aria-label": "Lücke, antippen zum Leeren" });
-    const chips = ex.options.map((o, i) => h("button.tile", { type: "button", onclick: () => pick(i) }, o));
-    function pick(i) {
-      if (phase !== "answer") return;
-      if (chosen != null) chips[chosen].classList.remove("used");
-      chosen = i;
-      chips[i].classList.add("used");
-      gap.textContent = ex.options[i];
-      gap.classList.remove("filled");
-      void gap.offsetWidth; // Animation neu starten
-      gap.classList.add("filled");
-      setReady(true);
+  // ---------- Ablegen: Begriffe in Felder, Kette, Lücken oder Bildstellen ----------
+  /**
+   * Gemeinsame Mechanik für die Strukturaufgaben. Antippen (Begriff → Zone oder Zone → Begriff) oder Ziehen.
+   * zones: [{ el, list, name, cap }] – `list` nimmt die Begriffe auf, cap 1 = Lücke/Stelle (tauscht), sonst beliebig viele.
+   * mode "fill": Antippen eines Begriffs füllt die gewählte bzw. nächste freie Zone (Lücken, Kette).
+   */
+  function placer({ options, zones, bank, mode = "pick", ready }) {
+    const live = h("p.visually-hidden", { "aria-live": "polite" });
+    const chips = options.map((text, i) => h("button.piece", { type: "button", "aria-pressed": "false", "data-i": String(i) }, text));
+    const at = new Map(chips.map((c) => [c, null])); // Begriff → Zonen-Index, null = Auswahl unten
+    let sel = null;
+    let selZone = null;
+    let dragged = false;
+    bank.append(...chips);
+
+    // Reihenfolge wie auf dem Bildschirm (wichtig für die Kette)
+    const inZone = (zi) => [...(zi == null ? bank : zones[zi].list).children].filter((c) => chips.includes(c));
+    const markSel = () => {
+      chips.forEach((c) => c.setAttribute("aria-pressed", String(c === sel)));
+      zones.forEach((z, zi) => z.el.classList.toggle("is-picked", zi === selZone));
+    };
+    const changed = () => setReady(ready(zones.map((_, zi) => inZone(zi).length), inZone(null).length));
+
+    /** Begriff an seinen Platz: Zone zi oder zurück in die Auswahl (an seine alte Stelle). */
+    function move(c, zi) {
+      const zone = zones[zi];
+      const bumped = zone?.cap === 1 ? inZone(zi).find((x) => x !== c) : null;
+      flip(chips, () => {
+        for (const x of [bumped, zi == null ? c : null].filter(Boolean)) {
+          at.set(x, null);
+          const next = chips.find((y) => at.get(y) === null && y !== x && Number(y.dataset.i) > Number(x.dataset.i));
+          bank.insertBefore(x, next ?? null);
+        }
+        if (zone) {
+          at.set(c, zi);
+          zone.list.append(c);
+        }
+        if (c.style.transform) c.style.transform = "";
+      });
+      sel = null;
+      selZone = null;
+      markSel();
+      live.textContent = zone ? `${c.textContent} → ${zone.name}` : `${c.textContent} zurück in die Auswahl`;
+      changed();
     }
-    gap.addEventListener("click", () => {
-      if (phase !== "answer" || chosen == null) return;
-      chips[chosen].classList.remove("used");
-      chosen = null;
-      gap.textContent = "";
-      gap.classList.remove("filled");
-      setReady(false);
-    });
+
+    function tapChip(c) {
+      if (phase !== "answer") return;
+      const zi = at.get(c);
+      if (zi != null && (mode === "fill" || zones[zi].cap === 1)) return move(c, null); // aus Lücke/Kette/Stelle zurück
+      if (zi == null && selZone != null) return move(c, selZone);
+      if (zi == null && mode === "fill") {
+        const free = zones.findIndex((z, i) => inZone(i).length < z.cap);
+        if (free >= 0) return move(c, free);
+      }
+      sel = sel === c ? null : c;
+      selZone = null;
+      markSel();
+    }
+
+    function tapZone(zi) {
+      if (phase !== "answer") return;
+      if (sel) return move(sel, zi);
+      if (zones[zi].cap === 1) {
+        selZone = selZone === zi ? null : zi;
+        markSel();
+      }
+    }
+
+    chips.forEach((c) => c.addEventListener("click", () => (dragged ? (dragged = false) : tapChip(c))));
+    zones.forEach((z, zi) => z.el.addEventListener("click", (e) => !e.target.closest(".piece") && tapZone(zi)));
+    bank.addEventListener("click", (e) => !e.target.closest(".piece") && sel && at.get(sel) != null && move(sel, null));
+
+    // Ziehen: folgt dem Finger 1:1, die Zone darunter leuchtet, Loslassen setzt den Begriff per FLIP ab.
+    const hit = (x, y) => {
+      const inside = (el) => {
+        const r = el.getBoundingClientRect();
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+      };
+      const zi = zones.findIndex((z) => inside(z.el));
+      return zi >= 0 ? zi : inside(bank) ? "bank" : -1;
+    };
+    chips.forEach((c) =>
+      c.addEventListener("pointerdown", (e) => {
+        if (phase !== "answer" || e.button > 0) return;
+        c.setPointerCapture(e.pointerId);
+        const x0 = e.clientX;
+        const y0 = e.clientY;
+        let over = -1;
+        let on = false;
+        const moveH = (ev) => {
+          const dx = ev.clientX - x0;
+          const dy = ev.clientY - y0;
+          if (!on && Math.hypot(dx, dy) < 6) return;
+          if (!on) {
+            on = true;
+            c.getAnimations().forEach((a) => a.cancel());
+            c.classList.add("is-dragging");
+          }
+          c.style.transform = `translate(${dx}px, ${dy}px) scale(1.04)`;
+          const now = hit(ev.clientX, ev.clientY);
+          if (now !== over) {
+            zones[over]?.el.classList.remove("is-over");
+            zones[now]?.el.classList.add("is-over");
+            over = now;
+          }
+        };
+        const up = (ev) => {
+          c.removeEventListener("pointermove", moveH);
+          c.removeEventListener("pointerup", up);
+          c.removeEventListener("pointercancel", up);
+          if (!on) return;
+          dragged = true; // folgenden Klick schlucken
+          setTimeout(() => (dragged = false), 0);
+          c.classList.remove("is-dragging");
+          zones[over]?.el.classList.remove("is-over");
+          const target = ev.type === "pointercancel" ? -1 : hit(ev.clientX, ev.clientY);
+          if (target === "bank") move(c, null);
+          else if (target >= 0) move(c, target);
+          else flip([c], () => (c.style.transform = ""), 260); // zurückgleiten
+        };
+        c.addEventListener("pointermove", moveH);
+        c.addEventListener("pointerup", up);
+        c.addEventListener("pointercancel", up);
+      }),
+    );
+
     return {
-      el: h("div.stack", h("p.blank-sentence", pre, gap, rest.join("___")), h("div.bank", chips)),
-      key: (n) => n <= chips.length && pick(n - 1),
-      value: () => (chosen == null ? null : ex.options[chosen]),
-      mark(ok) {
+      chips,
+      live,
+      inZone,
+      /** Zifferntaste: gewählten Begriff in Zone n legen, sonst Begriff n wählen. */
+      key(n) {
+        if (sel) return n <= zones.length && move(sel, n - 1);
+        const free = inZone(null)[n - 1];
+        if (free) tapChip(free);
+      },
+      /** Lösung zeigen: plan(c) → Ziel-Zone oder null. Richtig liegende bleiben, der Rest gleitet gestaffelt an seinen Platz. */
+      settle(plan, order) {
         chips.forEach((c) => (c.disabled = true));
-        gap.disabled = true;
-        gap.classList.add(ok ? "is-right" : "is-wrong");
-        if (!ok) shake(gap);
+        const wrong = chips.filter((c) => at.get(c) !== plan(c) || (order && at.get(c) != null && order(c) !== inZone(at.get(c)).indexOf(c)));
+        chips.forEach((c) => at.get(c) != null && c.classList.add(wrong.includes(c) ? "is-wrong" : "is-right"));
+        wrong.filter((c) => at.get(c) != null).forEach(shake);
+        if (!wrong.length) return;
+        setTimeout(() => {
+          flip(chips, () => {
+            for (const c of [...chips].sort((a, b) => (order ? order(a) - order(b) : 0))) {
+              const zi = plan(c);
+              const was = at.get(c);
+              at.set(c, zi);
+              (zi == null ? bank : zones[zi].list).append(c);
+              c.classList.remove("is-wrong");
+              if (zi != null && (was !== zi || wrong.includes(c))) c.classList.add("is-fixed");
+            }
+          }, 380);
+        }, reduceMotion() ? 0 : 550);
+      },
+    };
+  }
+
+  /** Ordnet Begriffe den Zielen zu, auch wenn ein Wort mehrfach vorkommt (z. B. zweimal „Blatt“). */
+  function assign(chips, wants) {
+    const free = new Set(chips);
+    const plan = new Map();
+    wants.forEach((w, zi) => {
+      const c = [...free].find((x) => norm(x.textContent) === norm(w));
+      if (c) {
+        free.delete(c);
+        plan.set(c, zi);
+      }
+    });
+    return (c) => plan.get(c) ?? null;
+  }
+
+  /** Lückentext mit 1–5 Lücken. `fill_blank` (eine Lücke) schickt wie bisher nur das Wort. */
+  function blank(ex) {
+    const parts = ex.prompt.split("___");
+    const zones = parts.slice(1).map((_, i) => {
+      const gap = h("span.blank", { role: "group", "aria-label": `Lücke ${i + 1}` });
+      return { el: gap, list: gap, name: `Lücke ${i + 1}`, cap: 1 };
+    });
+    const bank = h("div.bank");
+    const sentence = h("p.blank-sentence", parts.flatMap((p, i) => (i ? [zones[i - 1].el, p] : [p])));
+    const pl = placer({ options: ex.options, zones, bank, mode: "fill", ready: (n) => n.every((x) => x === 1) });
+    const words = () => zones.map((_, i) => pl.inZone(i)[0]?.textContent ?? "");
+    return {
+      el: h("div.stack", sentence, bank, pl.live),
+      key: pl.key,
+      value: () => (ex.kind === "fill_blank" ? words()[0] || null : words()),
+      text: () => words().join(" · "),
+      mark(ok, expected, solution) {
+        pl.settle(assign(pl.chips, solution ?? [expected]));
+      },
+    };
+  }
+
+  const SWOT = [/^(stärke|strength)/i, /^(schwäche|weakness)/i, /^(chance|opportunit)/i, /^(risik|threat|gefahr|bedrohung)/i];
+
+  /** Matrix oder Felder. Vier SWOT-Felder bekommen die Achsen intern/extern und hilfreich/schädlich. */
+  function board(ex) {
+    const slot = ex.groups.map((g) => SWOT.findIndex((re) => re.test(g.trim())));
+    const swot = ex.groups.length === 4 && new Set(slot).size === 4 && !slot.includes(-1);
+    // ponytail: nur SWOT hat Achsen; weitere Raster (BCG, Ansoff) bei Bedarf hier ergänzen.
+    const order = swot ? [0, 1, 2, 3].map((s) => slot.indexOf(s)) : ex.groups.map((_, i) => i);
+    const zones = order.map((gi, pos) => {
+      const list = h("div.zone-list");
+      const el = h("div.zone", { "data-tone": String(pos % 4) }, h("button.zone-head", { type: "button", "aria-label": `In „${ex.groups[gi]}“ legen` }, h("span.num", String(pos + 1)), ex.groups[gi]), list);
+      return { el, list, name: ex.groups[gi], cap: Infinity };
+    });
+    const bank = h("div.bank");
+    const pl = placer({ options: ex.options, zones, bank, ready: (n) => n.every((x) => x > 0) });
+    const cols = ex.groups.length === 4 ? 2 : ex.groups.length;
+    const grid = swot
+      ? h("div.board.matrix.swot", h("span"), h("span.axis", "hilfreich"), h("span.axis", "schädlich"), h("span.axis.side", "intern"), zones[0].el, zones[1].el, h("span.axis.side", "extern"), zones[2].el, zones[3].el)
+      : h("div.board", { style: { "--cols": String(cols) } }, zones.map((z) => z.el));
+    return {
+      el: h("div.stack", grid, h("p.hint", "Was nirgends passt, bleibt unten."), bank, pl.live),
+      key: pl.key,
+      value: () => Object.fromEntries(zones.map((z, zi) => [z.name, pl.inZone(zi).map((c) => c.textContent)])),
+      text: () => zones.map((z, zi) => `${z.name}: ${pl.inZone(zi).map((c) => c.textContent).join(", ") || "–"}`).join("; "),
+      mark(ok, expected, solution) {
+        const home = new Map((solution ?? []).flatMap((g) => g.items.map((i) => [norm(i), zones.findIndex((z) => z.name === g.name)])));
+        pl.settle((c) => home.get(norm(c.textContent)) ?? null);
+      },
+    };
+  }
+
+  /** Reihenfolge als Prozesskette: Antippen hängt den Schritt an, Antippen in der Kette legt ihn zurück. */
+  function chain(ex) {
+    const list = h("div.chain", { role: "group", "aria-label": "Deine Reihenfolge" });
+    const zones = [{ el: list, list, name: "Kette", cap: ex.options.length }];
+    const bank = h("div.bank");
+    const pl = placer({ options: ex.options, zones, bank, mode: "fill", ready: (_, rest) => rest === 0 });
+    const steps = () => pl.inZone(0).map((c) => c.textContent);
+    return {
+      el: h("div.stack", list, bank, pl.live),
+      key: pl.key,
+      value: () => steps(),
+      text: () => steps().join(" → "),
+      mark(ok, expected, solution) {
+        const rank = new Map((solution ?? []).map((s, i) => [norm(s), i]));
+        pl.settle(() => 0, (c) => rank.get(norm(c.textContent)) ?? 99);
+      },
+    };
+  }
+
+  /** Grafik beschriften: nummerierte Stellen über dem Bild, Begriffe darunter. */
+  function figure(ex) {
+    const img = h("img", { src: ex.image, alt: "Grafik zum Beschriften", draggable: "false" });
+    const stage = h("div.figure", img);
+    const zones = ex.spots.map(([x, y, w, hh], i) => {
+      // Mittelpunkt auf die Beschriftung, Mindestgröße per CSS: lesbar auch bei kleinen Stellen am Handy
+      const el = h("div.spot", { style: { left: `${(x + w / 2) * 100}%`, top: `${(y + hh / 2) * 100}%`, width: `${w * 100}%`, height: `${hh * 100}%` }, role: "group", "aria-label": `Stelle ${i + 1}` }, h("span.spot-num", String(i + 1)));
+      stage.append(el);
+      return { el, list: el, name: `Stelle ${i + 1}`, cap: 1 };
+    });
+    const wrap = h("div.figure-wrap", stage);
+    // Liegen Stellen in einer Zeile zu dicht (z. B. Länder auf einer Karte), wird das Bild breiter und scrollt waagerecht.
+    // Sonst kein overflow: der Rahmen würde Begriffe abschneiden, die aus der Auswahl hineinfliegen.
+    // ponytail: „gleiche Zeile“ = Mittelpunkte < 6 % der Höhe auseinander; genügt für Folien.
+    requestAnimationFrame(() => {
+      let dx = 1;
+      ex.spots.forEach(([x1, y1, w1, h1], i) =>
+        ex.spots.slice(i + 1).forEach(([x2, y2, w2, h2]) => {
+          if (Math.abs(y1 + h1 / 2 - (y2 + h2 / 2)) < 0.06) dx = Math.min(dx, Math.abs(x1 + w1 / 2 - (x2 + w2 / 2)));
+        }),
+      );
+      const need = Math.min(1400, Math.ceil(56 / Math.max(dx, 0.01)));
+      if (need <= wrap.clientWidth - 28) return;
+      stage.style.minWidth = `${need}px`;
+      wrap.classList.add("scroll");
+    });
+    const bank = h("div.bank");
+    const pl = placer({ options: ex.options, zones, bank, ready: (n) => n.every((x) => x === 1) });
+    const words = () => zones.map((_, i) => pl.inZone(i)[0]?.textContent ?? "");
+    return {
+      el: h("div.stack", wrap, bank, pl.live),
+      key: pl.key,
+      value: () => words(),
+      text: () => words().map((w, i) => `${i + 1} ${w || "–"}`).join(" · "),
+      mark(ok, expected, solution) {
+        pl.settle(assign(pl.chips, solution ?? []));
       },
     };
   }
@@ -177,11 +431,13 @@ export function openLesson(unitId, onExit) {
     mainBtn.textContent = "Prüfen";
     foot.hidden = ex.kind === "match";
     menuBtn.hidden = !ex.id; // „Zuordnen“ kommt aus den Begriffen, nicht aus einer Frage
-    cur.view = ex.kind === "mc" ? choice(ex) : ex.kind === "true_false" ? choice(ex, true) : ex.kind === "fill_blank" ? blank(ex) : match(ex);
+    const view = { mc: () => choice(ex), true_false: () => choice(ex, true), fill_blank: () => blank(ex), cloze: () => blank(ex), sort: () => board(ex), order: () => chain(ex), label: () => figure(ex) }[ex.kind];
+    cur.view = view ? view() : match(ex);
+    const label = ex.kind === "sort" && ex.groups.length === 4 ? "Fülle die Matrix" : LABEL[ex.kind];
     body.replaceChildren(
       ...[
-        h("p.q-kind", ex.retry ? `Nochmal: ${LABEL[ex.kind]}` : LABEL[ex.kind]),
-        ex.kind === "fill_blank" || ex.kind === "match" ? null : h("h1.q-prompt", ex.prompt),
+        h("p.q-kind", ex.retry ? `Nochmal: ${label}` : label),
+        ["fill_blank", "cloze", "match"].includes(ex.kind) ? null : h("h1.q-prompt", ex.prompt),
         cur.view.el,
       ].filter(Boolean),
     );
@@ -205,8 +461,8 @@ export function openLesson(unitId, onExit) {
     phase = "checking";
     setReady(false);
     try {
-      const res = await call("answer", { questionId: cur.ex.id, given, retry: !!cur.ex.retry });
-      cur.view.mark(res.correct, res.expected);
+      const res = await call("answer", { questionId: cur.ex.id, given: typeof given === "string" ? given : JSON.stringify(given), retry: !!cur.ex.retry });
+      cur.view.mark(res.correct, res.expected, res.solution);
       verdict(res.correct, res.expected, res.why);
     } catch (e) {
       phase = "answer";
@@ -239,7 +495,7 @@ export function openLesson(unitId, onExit) {
             onclick: () =>
               openChat(unitId, "", {
                 shown: "Warum ist das so?",
-                sent: `Frage: ${ex.prompt}\nRichtige Antwort: ${expected}\nMeine Antwort: ${cur.view.value()}\nErkläre mir in 3-4 einfachen Sätzen, warum die richtige Antwort stimmt.`,
+                sent: `Frage: ${ex.prompt}\nRichtige Antwort: ${expected}\nMeine Antwort: ${cur.view.text?.() ?? cur.view.value()}\nErkläre mir in 3-4 einfachen Sätzen, warum die richtige Antwort stimmt.`,
               }),
           }, icon("sparkle"), "Warum?")
         : null;
@@ -248,7 +504,7 @@ export function openLesson(unitId, onExit) {
       h(
         "div.inner",
         h("h2", icon(ok ? "check-circle-fill" : "x-circle-fill"), ok ? PRAISE[Math.floor(Math.random() * PRAISE.length)] : "Nicht ganz"),
-        !ok && expected ? h("p.detail", "Richtig ist: ", h("b", expected)) : null,
+        !ok && expected && CLASSIC.includes(ex.kind) ? h("p.detail", "Richtig ist: ", h("b", expected)) : null,
         why ? h("p.why", why) : null,
         h("div.actions", whyBtn, nextBtn),
       ),
@@ -291,6 +547,8 @@ export function openLesson(unitId, onExit) {
     edit.addEventListener("click", () => {
       s.close();
       editQuestion(q, (saved) => {
+        // Strukturaufgaben baut der Kern für die Lektion um: neue Fassung kommt in der nächsten Lektion.
+        if (!CLASSIC.includes(ex.kind)) return drop(ex);
         // Aktuelle Aufgabe und spätere Wiederholungen derselben Frage übernehmen die neue Fassung.
         for (const e of [cur.ex, ...queue]) {
           if (e.id === saved.id) Object.assign(e, { prompt: saved.prompt, options: e.kind === "true_false" ? saved.options : shuffle(saved.options) });
@@ -447,7 +705,7 @@ export function openLesson(unitId, onExit) {
       e.preventDefault();
       askClose();
     } else if (e.key === "Enter") {
-      if (e.target instanceof Element && e.target.closest(".feedback, .lesson-top, input, textarea")) return; // dort reagiert das Element selbst
+      if (e.target instanceof Element && e.target.closest(".feedback, .lesson-top, input, textarea, .piece, .zone-head")) return; // dort reagiert das Element selbst
       e.preventDefault();
       if (phase === "answer") check();
       else if (phase === "feedback") next();

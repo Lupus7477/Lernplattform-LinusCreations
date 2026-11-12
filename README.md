@@ -15,11 +15,35 @@ Die Apps laufen **immer lokal**. Optional verbinden sie sich mit deinem Server (
 
 ## So funktioniert es
 
-1. **Hinzufügen:** PDF auswählen. Der Text wird im Gerät bzw. Browser gelesen (pdf.js) und in Abschnitte von etwa 5000 Zeichen geteilt.
-2. **Vorbereiten (KI, im Hintergrund):** Pro Abschnitt erzeugt die KI Titel, Zusammenfassung und die wichtigsten Begriffe. Fragen entstehen, wenn eine Einheit dran ist; die nächste wird vorab vorbereitet.
-3. **Lernen (ohne KI):** Multiple Choice, Richtig/Falsch, Lückentext und Begriffe zuordnen. Die Antworten prüft der Code, nicht die KI.
+1. **Hinzufügen:** PDF auswählen. Der Text wird im Gerät bzw. Browser gelesen (pdf.js) und in Abschnitte von etwa 5000 Zeichen geteilt. Dabei werden auch Grafiken gesucht (siehe unten).
+2. **Vorbereiten (KI, im Hintergrund):** Pro Abschnitt erzeugt die KI Titel, Zusammenfassung und die wichtigsten Begriffe. Fragen entstehen, wenn eine Einheit dran ist; die nächste wird vorab vorbereitet. Danach schreibt die KI 1–2 Strukturaufgaben, die zum Stoff passen.
+3. **Lernen (ohne KI):** Die Antworten prüft der Code, nicht die KI.
+   - Multiple Choice, Richtig/Falsch, Lückentext (eine oder mehrere Lücken), Begriffe zuordnen
+   - **Matrix füllen:** Aussagen in Felder ziehen oder antippen. Vier Felder werden zur 2×2-Matrix, eine SWOT bekommt die Achsen intern/extern und hilfreich/schädlich. Ab Stufe 2 als Szenario („Erstelle die SWOT für ein Café“) mit Aussagen, die nirgends hingehören.
+   - **Reihenfolge:** Schritte eines Ablaufs zur Prozesskette ordnen.
+   - **Grafik beschriften:** eine Grafik aus den Folien mit nummerierten Stellen, die Begriffe stehen zur Auswahl.
+   
+   Nach dem Prüfen gleiten falsch abgelegte Begriffe an ihren richtigen Platz.
 4. **Wiederholen:** Leitner-Boxen (1, 3, 7, 14, 30 Tage).
 5. **Motivation:** XP, Tagesziel, Streak, Lernstufe je Einheit.
+
+### Strukturaufgaben: nur wenn der Stoff sie hergibt
+
+- **Matrix:** Die KI legt sie nur an, wenn das Material selbst in Kategorien einteilt. Der Code prüft zusätzlich, ob jeder Feldname im Abschnitt vorkommt.
+- **Selbstprüfung:** Jede Strukturaufgabe löst die KI ein zweites Mal, ohne die Lösung zu sehen.
+  - Matrix: Nur Aussagen, bei denen beide Durchläufe übereinstimmen, bleiben in der Aufgabe.
+  - Reihenfolge und Lückentext: Bei der kleinsten Abweichung wird die Aufgabe verworfen.
+- **Grafiken** brauchen keine KI. pdf.js liefert jedes Textstück mit seiner Position.
+  - Kurze Texte an einem Bild oder an Formen gelten als Beschriftung. Der Code schneidet die Grafik aus, übermalt die Beschriftungen in der Umgebungsfarbe und fragt sie ab.
+  - Bilder ohne Textebene (Karte, Foto) werden mitgespeichert; ihre Stellen setzt man über „+ Aufgabe“ selbst.
+  - Für schon eingelesene PDFs: Kurs bearbeiten → „Grafiken zum Beschriften“ → dieselbe Datei wählen.
+
+### Eigene Aufgaben
+
+Auf der Lernkarte unter „Fragen dieser Einheit“ → **Aufgabe hinzufügen**:
+- Wählbar sind Multiple Choice, Richtig/Falsch, Lückentext (`[Lücke]` in eckigen Klammern), Zuordnen/Matrix, Reihenfolge und Bild beschriften.
+- Für „Bild beschriften“ nimmst du eine Grafik aus dem Skript oder ein eigenes Foto, auch direkt mit der Kamera. Dann tippst du ins Bild und beschriftest jede Stelle.
+- Die Aufgabe gilt, wie Bearbeiten, für alle im Kurs.
 
 ### Fragen bearbeiten oder ausblenden
 
@@ -151,8 +175,8 @@ Oberfläche ohne Rust: `python3 -m http.server 8765 -d web`. Dann ersetzt `web/d
 core/src/            Crate lernpfad-core: alles, was App und Server teilen
   api.rs             alle Befehle der Oberfläche + Rechteprüfung (Besitzer, Mitglied)
   ai.rs              Modell-Download, Laden/Entladen, Text erzeugen (llama.cpp)
-  import.rs          Abschnitte, Prompts, Qualitätsfilter für Fragen, Hintergrund-Worker
-  learn.rs           Antwortprüfung, Leitner-Boxen, XP, Streak
+  import.rs          Abschnitte, Prompts, Qualitätsfilter, Strukturaufgaben + Selbstprüfung, Grafiken, Hintergrund-Worker
+  learn.rs           Antwortprüfung (auch Matrix, Reihenfolge, Lücken, Grafik), Leitner-Boxen, XP, Streak
   db.rs              SQLite-Schema und Migration
 src-tauri/src/lib.rs Tauri-Hülle: lokal oder an den eigenen Server weiterleiten (Zertifikat gepinnt)
 server/src/
@@ -160,6 +184,11 @@ server/src/
   auth.rs            Argon2id, Sitzungen, Passwortregeln, Sperr-Timer
 web/                 Oberfläche (Vanilla-JS-Module, kein Build-Schritt), für alle Varianten gleich
 ```
+
+## Ideen
+ 
+Quiz Duell wenn auf Server und es Kommonitonen gibt, ...
+
 
 ## Datenschutz
 

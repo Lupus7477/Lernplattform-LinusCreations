@@ -216,6 +216,7 @@ button {
 .topbar {
   position: sticky;
   top: 0;
+  min-width: 0; /* Grid-Spalte nicht durch lange Kursnamen aufdehnen */
   z-index: var(--z-bar);
   display: flex;
   align-items: center;
@@ -465,6 +466,8 @@ main:focus,
 }
 .course-pill {
   max-width: 52vw;
+  min-width: 0; /* lange Kursnamen („Wirtschaftsinformatik“) kürzen statt die Leiste zu sprengen */
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -487,6 +490,13 @@ main:focus,
   .topbar .mark-brand {
     visibility: hidden;
   }
+}
+.topbar .num {
+  white-space: nowrap;
+}
+.course-pill > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .course-pill select {
   position: absolute;
@@ -1751,6 +1761,421 @@ textarea.input {
   text-overflow: ellipsis;
 }
 
+/* ---------- Strukturaufgaben: Begriffe ablegen ---------- */
+.piece {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 14px;
+  border-radius: var(--r-sm);
+  border: 2px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 3px 0 var(--line);
+  font: 600 0.98rem/1.25 var(--font-text);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  /* kein transform hier: FLIP und Ziehen bewegen den Begriff per transform */
+  transition:
+    scale 120ms var(--ease-out),
+    border-color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease;
+}
+.piece:active:not(:disabled) {
+  scale: 0.97;
+}
+.piece[aria-pressed="true"] {
+  border-color: var(--royal);
+  background: var(--royal-soft);
+  box-shadow: 0 3px 0 var(--royal);
+}
+.piece.is-dragging {
+  position: relative;
+  z-index: 5;
+  cursor: grabbing;
+  box-shadow: 0 14px 30px rgb(14 19 30 / 0.22);
+  transition: none;
+}
+.piece.is-right {
+  border-color: var(--right);
+  background: var(--right-soft);
+  box-shadow: 0 3px 0 var(--right);
+  color: var(--right-ink);
+}
+.piece.is-wrong {
+  border-color: var(--wrong);
+  background: var(--wrong-soft);
+  box-shadow: 0 3px 0 var(--wrong);
+  color: var(--wrong-ink);
+}
+.piece.is-fixed {
+  border-style: dashed;
+  border-color: var(--right);
+  background: var(--right-soft);
+  box-shadow: none;
+  color: var(--right-ink);
+}
+.piece:disabled {
+  cursor: default;
+}
+.bank {
+  min-height: 44px;
+}
+
+/* Matrix / Felder */
+.board {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr));
+}
+.board.swot {
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 10px;
+}
+.axis {
+  font: 700 0.72rem/1 var(--font-text);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--ink-2);
+}
+.axis.side {
+  writing-mode: vertical-rl;
+  rotate: 180deg;
+  align-self: center;
+}
+.zone {
+  --tone: var(--right);
+  --tone-soft: var(--right-soft);
+  --tone-ink: var(--right-ink);
+  --tone-on: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 132px;
+  padding: 10px;
+  border-radius: var(--r);
+  border: 2px dashed color-mix(in srgb, var(--tone) 45%, transparent);
+  background: var(--tone-soft);
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+.zone[data-tone="1"] {
+  --tone: var(--wrong);
+  --tone-soft: var(--wrong-soft);
+  --tone-ink: var(--wrong-ink);
+}
+.zone[data-tone="2"] {
+  --tone: var(--royal);
+  --tone-soft: var(--royal-soft);
+  --tone-ink: var(--royal);
+  --tone-on: var(--on-royal);
+}
+.zone[data-tone="3"] {
+  --tone: var(--marker-lip);
+  --tone-soft: var(--marker-soft);
+  --tone-ink: var(--marker-ink);
+  --tone-on: var(--on-marker);
+}
+.zone.is-over,
+.zone.is-picked {
+  border-style: solid;
+  border-color: var(--tone);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--tone) 20%, transparent);
+}
+.zone-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: var(--tone-ink);
+  font: 700 0.98rem/1.2 var(--font-display);
+}
+.zone-head .num {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--tone);
+  color: var(--tone-on);
+  font: 700 0.75rem/1 var(--font-text);
+}
+.zone-list {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 6px;
+}
+.zone-list .piece {
+  min-height: 38px;
+  padding: 6px 10px;
+  font-size: 0.9rem;
+}
+@media (max-width: 420px) {
+  .zone {
+    min-height: 112px;
+    padding: 8px;
+  }
+  .zone-list .piece {
+    font-size: 0.84rem;
+  }
+}
+
+/* Reihenfolge als Prozesskette */
+.chain {
+  display: grid;
+  gap: 10px;
+  counter-reset: step;
+  min-height: 64px;
+}
+.chain:empty {
+  border: 2px dashed var(--line);
+  border-radius: var(--r);
+}
+.chain:empty::before {
+  content: "Tippe die Schritte der Reihe nach an.";
+  display: block;
+  padding: 20px;
+  text-align: center;
+  color: var(--ink-2);
+}
+.chain > .piece {
+  position: relative;
+  width: 100%;
+  padding-left: 54px;
+  counter-increment: step;
+}
+.chain > .piece::before {
+  content: counter(step);
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  translate: 0 -50%;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--royal);
+  color: var(--on-royal);
+  font: 700 0.85rem/1 var(--font-text);
+}
+.chain > .piece + .piece::after {
+  content: "";
+  position: absolute;
+  left: 25px;
+  top: -14px;
+  width: 2px;
+  height: 12px;
+  background: color-mix(in srgb, var(--royal) 45%, transparent);
+}
+.chain > .piece.is-right::before,
+.chain > .piece.is-fixed::before {
+  background: var(--right);
+}
+.chain > .piece.is-wrong::before {
+  background: var(--wrong);
+}
+
+/* Lücken nehmen den Begriff selbst auf */
+.blank {
+  cursor: pointer;
+}
+.blank:has(.piece) {
+  min-width: 0;
+  padding: 0;
+  border-bottom-color: transparent;
+  background: none;
+}
+.blank.is-picked {
+  border-bottom-style: solid;
+  background: var(--royal-soft);
+}
+.blank .piece {
+  min-height: 38px;
+  padding: 4px 12px;
+  box-shadow: none;
+  font-size: 1.05rem;
+}
+
+/* Grafik beschriften */
+.figure-wrap {
+  padding: 14px; /* Platz für die Nummern am Rand */
+  border-radius: var(--r);
+  border: 2px solid var(--line);
+  background: #fff; /* Folien sind hell, auch im Dunkelmodus */
+}
+.figure-wrap.scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+.figure {
+  position: relative;
+}
+.figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.spot {
+  position: absolute;
+  translate: -50% -50%;
+  min-width: 48px;
+  min-height: 28px;
+  display: flex;
+  align-items: stretch;
+  border-radius: 8px;
+  border: 2px dashed var(--royal);
+  background: color-mix(in srgb, var(--royal-soft) 92%, transparent);
+  container-type: size;
+  cursor: pointer;
+  transition: box-shadow 160ms ease;
+}
+.spot::after {
+  content: "";
+  position: absolute;
+  inset: -8px; /* größere Trefferfläche für kleine Stellen */
+}
+.spot.is-over,
+.spot.is-picked {
+  border-style: solid;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--royal) 28%, transparent);
+}
+.spot:has(.piece) {
+  border-color: transparent;
+  background: none;
+}
+.spot-num {
+  position: absolute;
+  z-index: 1;
+  top: -11px;
+  left: -11px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--royal);
+  color: var(--on-royal);
+  font: 700 0.72rem/22px var(--font-text);
+  text-align: center;
+  pointer-events: none;
+}
+.spot .piece {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 6px;
+  border-radius: 6px;
+  box-shadow: none;
+  font-size: clamp(0.6rem, 55cqh, 0.95rem);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Aufgabe anlegen: Felder, Galerie, Stellen setzen */
+.group-row {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: var(--r-sm);
+  background: var(--paper);
+}
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+.gallery button {
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  overflow: hidden;
+  border-radius: var(--r-sm);
+  border: 2px solid var(--line);
+  background: #fff;
+}
+.gallery button[aria-pressed="true"] {
+  border-color: var(--royal);
+  box-shadow: 0 0 0 3px var(--royal-soft);
+}
+.gallery img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.figure.edit {
+  cursor: crosshair;
+}
+.spot.edit {
+  translate: none;
+  min-width: 0;
+  min-height: 0;
+  cursor: move;
+  touch-action: none;
+}
+.spot.edit:focus-visible {
+  outline: 3px solid var(--royal);
+  outline-offset: 2px;
+}
+.spot-label {
+  align-self: center;
+  overflow: hidden;
+  padding: 0 4px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--royal);
+  font: 700 clamp(0.55rem, 50cqh, 0.85rem) / 1 var(--font-text);
+}
+.spot .handle {
+  position: absolute;
+  z-index: 2;
+  right: -9px;
+  bottom: -9px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: var(--royal);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+.spot-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.spot-row .n {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--royal);
+  color: var(--on-royal);
+  font: 700 0.78rem/1 var(--font-text);
+}
+
 /* ---------- Weniger Bewegung ---------- */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -1779,6 +2204,9 @@ textarea.input {
   .tile:active:not(:disabled),
   .node:active:not(:disabled) {
     transform: none;
+  }
+  .piece:active:not(:disabled) {
+    scale: none;
   }
   .lesson {
     transition: opacity 200ms ease;

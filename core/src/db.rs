@@ -67,6 +67,19 @@ CREATE INDEX sessions_user ON sessions(user_id);
 PRAGMA user_version = 1;
 ";
 
+/// Version 2: Strukturaufgaben (Felder, Spots) und Grafiken aus dem PDF.
+/// `image` = data:-URL (jpeg/png/webp); `page` NULL = eigenes Bild.
+// ponytail: Bilder als data:-URL-Text, keine Base64-Umwandlung in Rust. Eigener Blob-Endpunkt, falls die Datenbank zu groß wird.
+const V2: &str = "
+CREATE TABLE figures(id INTEGER PRIMARY KEY, unit_id INTEGER NOT NULL REFERENCES units(id) ON DELETE CASCADE,
+  page INTEGER, image TEXT NOT NULL);
+ALTER TABLE questions ADD COLUMN groups TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE questions ADD COLUMN spots TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE questions ADD COLUMN figure_id INTEGER REFERENCES figures(id) ON DELETE CASCADE;
+CREATE INDEX figures_unit ON figures(unit_id);
+PRAGMA user_version = 2;
+";
+
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
@@ -80,6 +93,9 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
         }
         // foreign_keys lässt sich nur außerhalb einer Transaktion umschalten; ADD COLUMN mit Default braucht es aus.
         conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V1} COMMIT; PRAGMA foreign_keys = ON;"))?;
+    }
+    if version < 2 {
+        conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V2} COMMIT; PRAGMA foreign_keys = ON;"))?;
     }
     Ok(conn)
 }

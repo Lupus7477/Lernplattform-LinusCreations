@@ -1,5 +1,9 @@
 //! Lernlogik ohne KI: Antwortprüfung, Wiederholungs-Boxen (Leitner), XP, Streak.
 
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+
 /// Tage bis zur nächsten Wiederholung je Box (Box 0 = neu).
 const INTERVAL_DAYS: [i64; 6] = [0, 1, 3, 7, 14, 30];
 pub const MAX_BOX: i64 = 5;
@@ -42,6 +46,57 @@ pub fn check(kind: &str, expected: &str, given: &str) -> bool {
         return false;
     }
     e == g || (kind == "fill_blank" && e.chars().count() >= 5 && levenshtein(&e, &g) <= 1)
+}
+
+// ---------- Strukturaufgaben: Matrix, Reihenfolge, Lücken, Grafik ----------
+
+/// Ein Feld einer Matrix oder Zuordnung mit den Aussagen, die hineingehören.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Group {
+    pub name: String,
+    pub items: Vec<String>,
+}
+
+/// Stelle in einer Grafik (0–1 relativ zur Bildgröße) mit der richtigen Beschriftung.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Spot {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub label: String,
+}
+
+/// „Die [SWOT]-Analyse …“ → („Die ___-Analyse …“, ["SWOT"]). Eine offene Klammer ohne Ende bleibt stehen.
+pub fn cloze_parts(prompt: &str) -> (String, Vec<String>) {
+    let (mut text, mut gaps, mut rest) = (String::new(), Vec::new(), prompt);
+    while let Some(open) = rest.find('[') {
+        let Some(len) = rest[open..].find(']') else { break };
+        text.push_str(&rest[..open]);
+        text.push_str("___");
+        gaps.push(rest[open + 1..open + len].trim().to_string());
+        rest = &rest[open + len + 1..];
+    }
+    text.push_str(rest);
+    (text, gaps)
+}
+
+/// Fehler einer Zuordnung: Jede Aussage muss im richtigen Feld liegen, Ablenker (`spare`) gar nicht.
+/// `given` = Feldname → abgelegte Aussagen; was fehlt, liegt noch unten in der Bank.
+pub fn sort_mistakes(groups: &[Group], spare: &[String], given: &HashMap<String, Vec<String>>) -> usize {
+    let placed: HashMap<String, String> = given.iter().flat_map(|(g, items)| items.iter().map(move |i| (normalize(i), normalize(g)))).collect();
+    let wrong_items = groups.iter().flat_map(|g| g.items.iter().map(move |i| (i, g))).filter(|(i, g)| placed.get(&normalize(i)) != Some(&normalize(&g.name))).count();
+    wrong_items + spare.iter().filter(|s| placed.contains_key(&normalize(s))).count()
+}
+
+/// Positionsfehler für Reihenfolge, Lücken und Grafik-Stellen. Fehlende Einträge zählen als falsch.
+pub fn seq_mistakes(expected: &[String], given: &[String]) -> usize {
+    expected.iter().enumerate().filter(|(i, e)| given.get(*i).map(|g| normalize(g)) != Some(normalize(e))).count()
+}
+
+/// Bestanden: fehlerfrei, ab 6 Teilen ist ein Fehler erlaubt (wie beim Zuordnen der Begriffe).
+pub fn passed(mistakes: usize, n: usize) -> bool {
+    mistakes == 0 || (mistakes == 1 && n >= 6)
 }
 
 /// Neue Box nach einer Antwort: richtig → eine Box höher, falsch → zurück auf 1.
@@ -124,6 +179,26 @@ mod tests {
         assert!(check("fill_blank", "Variable", "Varible"));
         assert!(!check("fill_blank", "Bit", "Bot")); // kurze Wörter: exakt
         assert!(!check("mc", "", ""));
+    }
+
+    #[test]
+    fn checks_tasks() {
+        let (text, gaps) = cloze_parts("Die [SWOT]-Analyse verbindet [ interne ] und [externe] Sicht. [offen");
+        assert_eq!(text, "Die ___-Analyse verbindet ___ und ___ Sicht. [offen");
+        assert_eq!(gaps, vec!["SWOT", "interne", "externe"]);
+
+        let g = |n: &str, i: &[&str]| Group { name: n.into(), items: i.iter().map(|s| s.to_string()).collect() };
+        let groups = vec![g("Stärken", &["Treue Kunden"]), g("Risiken", &["Neue Konkurrenz", "Hohe Mieten"])];
+        let spare = vec!["Schönes Wetter".to_string()];
+        let given = |pairs: &[(&str, &[&str])]| -> HashMap<String, Vec<String>> { pairs.iter().map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect())).collect() };
+        assert_eq!(sort_mistakes(&groups, &spare, &given(&[("stärken", &["treue kunden"]), ("Risiken", &["Neue Konkurrenz", "Hohe Mieten"])])), 0);
+        assert_eq!(sort_mistakes(&groups, &spare, &given(&[("Stärken", &["Treue Kunden", "Schönes Wetter"]), ("Risiken", &["Neue Konkurrenz"])])), 2); // Ablenker abgelegt + vergessen
+        assert_eq!(sort_mistakes(&groups, &spare, &HashMap::new()), 3);
+
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(seq_mistakes(&s(&["a", "b", "c"]), &s(&["A", "b", "c"])), 0);
+        assert_eq!(seq_mistakes(&s(&["a", "b", "c"]), &s(&["b", "a"])), 3);
+        assert!(passed(0, 3) && !passed(1, 5) && passed(1, 6) && !passed(2, 8));
     }
 
     #[test]

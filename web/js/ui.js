@@ -130,6 +130,24 @@ export function shake(el) {
   );
 }
 
+/**
+ * Elemente gleiten vom alten an den neuen Platz (FLIP): messen, DOM ändern, vom alten Ort zurück animieren.
+ * Laufende Bewegungen werden unterbrochen, damit nichts springt, wenn man schnell weitertippt.
+ */
+export function flip(els, mutate, ms = 240) {
+  const first = new Map(els.map((e) => [e, e.getBoundingClientRect()]));
+  els.forEach((e) => e.getAnimations().forEach((a) => a.cancel()));
+  mutate();
+  if (reduceMotion()) return;
+  for (const [e, r] of first) {
+    const n = e.getBoundingClientRect();
+    const dx = r.left - n.left;
+    const dy = r.top - n.top;
+    if (Math.abs(dx) + Math.abs(dy) < 1) continue;
+    e.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], { duration: ms, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+  }
+}
+
 export function countUp(el, to, ms = 700) {
   if (reduceMotion() || to <= 0) {
     el.textContent = String(to);
