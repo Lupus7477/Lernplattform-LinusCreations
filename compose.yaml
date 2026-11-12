@@ -1,0 +1,16 @@
+services:
+  lernpfad:
+    build: .
+    image: lernpfad
+    ports:
+      - "8443:8443"
+    volumes:
+      - lernpfad-data:/data
+    restart: unless-stopped
+    # Weitere Namen fürs Zertifikat (z. B. Tailscale) und GPU per Vulkan, beides optional:
+    # command: ["--host", "pc.tailnet.ts.net"]
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+volumes:
+  lernpfad-data:

@@ -77,6 +77,13 @@ dist/
 build/
 out/
 # === Rust / Tauri ===
+/target/
 /src-tauri/target/
 /src-tauri/gen/
 .playwright-mcp/
+
+# Datenordner des Servers (Standard: --data ./data)
+/data/
+
+# Serverspezifisches (IP, RAM-Grenze) nur auf dem Server
+compose.override.yaml

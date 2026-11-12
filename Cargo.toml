@@ -1,0 +1,19 @@
+[workspace]
+members = ["core", "src-tauri", "server"]
+resolver = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Sampling-Schleife läuft pro Token über ~250k Kandidaten: auch im Entwicklungs-Build optimieren
+[profile.dev.package.llama-cpp-2]
+opt-level = 3
+[profile.dev.package.lernpfad-core]
+opt-level = 2
+# Passwort-Hashing ist absichtlich teuer; im Entwicklungs-Build sonst sekundenlang
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

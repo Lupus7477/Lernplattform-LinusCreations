@@ -7,6 +7,7 @@ import * as add from "./import.js";
 import * as profile from "./profile.js";
 import * as unit from "./unit.js";
 import { openLesson } from "./lesson.js";
+import * as auth from "./auth.js";
 
 const views = { learn: path, review, add, profile, unit };
 const TABS = [
@@ -22,11 +23,27 @@ let tabs;
 let mounted = { name: null, arg: null, el: null };
 let lesson = null;
 
+/** Läuft die Seite vom eigenen Server? Sonst (z. B. python -m http.server) → Beispieldaten. */
+async function servedByLernpfad() {
+  const r = await fetch("api/rpc/session", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => null);
+  return !!r && (r.ok || r.status === 401);
+}
+
 async function boot() {
-  if (!window.__TAURI__) await import("../dev/mock-tauri.js");
   applyTheme();
-  const sprite = await fetch("icons.svg").then((r) => r.text());
-  document.body.insertAdjacentHTML("afterbegin", sprite);
+  const sprite = fetch("icons.svg").then((r) => r.text());
+  if (!window.__TAURI__ && !(await servedByLernpfad())) await import("../dev/mock-tauri.js");
+  document.body.insertAdjacentHTML("afterbegin", await sprite);
+
+  try {
+    state.session = await call("session");
+  } catch (e) {
+    if (window.__TAURI__) return offline(String(e?.message || e)); // App mit Server verbunden, Server weg
+    throw e;
+  }
+  // Server ohne gültige Sitzung: nur die Anmeldung, keine Daten.
+  if (state.session.mode === "server" && !state.session.user) return auth.show(state.session);
+  addEventListener("lernpfad:logged-out", () => location.reload());
 
   [state.ai] = await Promise.all([call("ai_status"), loadCourses(), loadStats()]);
 
@@ -59,6 +76,26 @@ async function boot() {
 
   addEventListener("hashchange", route);
   route();
+}
+
+/** App ist mit dem eigenen Server verbunden, der gerade nicht antwortet: lokal geht immer. */
+function offline(message) {
+  const local = h("button.btn.block", { type: "button" }, icon("path"), "Lokal weiterlernen");
+  local.addEventListener("click", () => call("server_disconnect").then(() => location.reload()));
+  document.getElementById("app").replaceChildren(
+    h(
+      "main.auth",
+      h(
+        "div.card",
+        h("div.auth-brand", icon("hard-drives"), "Eigener Server"),
+        h("h1", "Server nicht erreichbar"),
+        h("p.muted", message),
+        h("p.muted", "Deine Daten auf diesem Gerät sind unverändert. Du kannst lokal weiterlernen und dich später wieder verbinden."),
+        local,
+        h("button.btn.secondary.block", { type: "button", onclick: () => location.reload() }, icon("arrow-clockwise"), "Erneut versuchen"),
+      ),
+    ),
+  );
 }
 
 function renderTopbar() {

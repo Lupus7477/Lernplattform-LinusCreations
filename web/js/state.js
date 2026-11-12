@@ -3,6 +3,8 @@ import { call } from "./api.js";
 import { gb, h, icon, pref } from "./ui.js";
 
 export const state = {
+  /** { mode: "local" | "server", user: { name, admin } | null } */
+  session: null,
   ai: null,
   courses: [],
   stats: null,

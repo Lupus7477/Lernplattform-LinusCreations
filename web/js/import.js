@@ -33,8 +33,9 @@ export async function render() {
 }
 
 function content(page) {
-  const courses = state.courses;
-  const selected = currentCourse();
+  // PDFs nur in eigene Kurse; geteilte Kurse gehören dem, der sie angelegt hat.
+  const courses = state.courses.filter((c) => c.mine);
+  const selected = currentCourse()?.mine ? currentCourse() : courses[0];
   const status = h("div.stack", { role: "status", "aria-live": "polite" });
 
   const newName = h("input.input", { id: "course-name", required: true, autocomplete: "off", placeholder: "z. B. Mikroökonomie" });
@@ -117,8 +118,8 @@ function content(page) {
     h("h1", "Skript hinzufügen"),
     aiNotice(),
     h("div.card", pick ? h("div.field", h("label", { for: "course-pick" }, "Kurs"), pick) : h("h2", "Neuer Kurs"), newFields, drop, status),
-    courses.length ? h("h2", "Deine Kurse") : null,
-    ...courses.map((c) => courseCard(c, page)),
+    state.courses.length ? h("h2", "Deine Kurse") : null,
+    ...state.courses.map((c) => courseCard(c, page)),
   ].filter(Boolean);
 }
 
@@ -126,7 +127,11 @@ function courseCard(c) {
   const done = c.ready === c.units;
   return h(
     "div.card.course-card",
-    h("div.row.between", h("h3", c.name), h("button.btn.ghost", { type: "button", onclick: () => editCourse(c) }, icon("pencil-simple"), "Bearbeiten")),
+    h(
+      "div.row.between",
+      h("h3", c.name, c.mine ? (c.shared ? h("span.badge", "Geteilt") : null) : h("span.badge", `von ${c.owner}`)),
+      c.mine ? h("button.btn.ghost", { type: "button", onclick: () => editCourse(c) }, icon("pencil-simple"), "Bearbeiten") : null,
+    ),
     c.exam_date ? h("p.muted", `Prüfung am ${fmtDate(c.exam_date)}`) : null,
     h("div.docs", c.documents.map((d) => h("span", icon("file-pdf"), d))),
     h("div.bar", h("i", { style: { "--p": String(c.units ? c.ready / c.units : 0) } })),
@@ -137,16 +142,30 @@ function courseCard(c) {
 function editCourse(c) {
   const name = h("input.input", { id: "edit-name", value: c.name, autocomplete: "off" });
   const date = h("input.input", { id: "edit-date", type: "date", value: c.exam_date || "" });
+  // Teilen gibt es nur auf dem eigenen Server: dort sehen alle Konten den Kurs.
+  const onServer = state.session?.mode === "server";
+  const share = onServer ? h("input.switch", { type: "checkbox", id: "edit-share", checked: c.shared }) : null;
   const save = h("button.btn.block", { type: "button" }, "Speichern");
   const del = h("button.btn.ghost", { type: "button", style: { color: "var(--wrong)" } }, icon("trash"), "Kurs löschen");
   const s = openSheet({
     title: "Kurs bearbeiten",
-    body: [h("div.field", h("label", { for: "edit-name" }, "Name"), name), h("div.field", h("label", { for: "edit-date" }, "Prüfungsdatum"), date), del],
+    body: [
+      h("div.field", h("label", { for: "edit-name" }, "Name"), name),
+      h("div.field", h("label", { for: "edit-date" }, "Prüfungsdatum"), date),
+      share
+        ? h(
+            "div.field",
+            h("div.row.between", h("label", { for: "edit-share" }, "Mit allen auf diesem Server teilen"), share),
+            h("span.hint", "Alle Konten auf dem Server können dann mit diesem Kurs lernen und Fragen verbessern. Dein Fortschritt bleibt deiner."),
+          )
+        : null,
+      del,
+    ],
     foot: save,
   });
   save.addEventListener("click", async () => {
     if (!name.value.trim()) return name.focus();
-    await call("update_course", { id: c.id, name: name.value, examDate: date.value || null });
+    await call("update_course", { id: c.id, name: name.value, examDate: date.value || null, shared: share ? share.checked : null });
     await loadCourses();
     emit("course-updated", c.id);
     emit("courses");

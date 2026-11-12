@@ -4,7 +4,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub type Db = std::sync::Arc<std::sync::Mutex<Connection>>;
 
-const SCHEMA: &str = "
+/// Version 0 (bis 0.2): wird immer zuerst angelegt, Änderungen kommen als Migration darüber.
+pub const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS courses(
@@ -38,9 +39,48 @@ CREATE INDEX IF NOT EXISTS questions_unit ON questions(unit_id);
 CREATE INDEX IF NOT EXISTS terms_unit ON terms(unit_id);
 ";
 
+/// Version 1: Konten, Fortschritt pro Nutzer (statt in `questions`), Kurs-Besitzer und Teilen.
+/// Nutzer 1 ist der lokale Nutzer der App (ohne Passwort); auf dem Server übernimmt ihn der erste Admin.
+const V1: &str = "
+CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, pw_hash TEXT,
+  admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+INSERT INTO users(id, name, admin, created_at) VALUES(1, 'Ich', 1, strftime('%s', 'now'));
+CREATE TABLE sessions(id INTEGER PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, label TEXT NOT NULL, ip TEXT NOT NULL);
+-- user_id NULL = Einladung für ein neues Konto, sonst Link zum Passwort-Zurücksetzen
+CREATE TABLE invites(code_hash TEXT PRIMARY KEY, created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL, used_at INTEGER);
+CREATE TABLE progress(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+  box INTEGER NOT NULL DEFAULT 0, due_at INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(user_id, question_id)) WITHOUT ROWID;
+INSERT INTO progress(user_id, question_id, box, due_at) SELECT 1, id, box, due_at FROM questions WHERE box > 0;
+ALTER TABLE questions DROP COLUMN box;
+ALTER TABLE questions DROP COLUMN due_at;
+ALTER TABLE courses ADD COLUMN owner_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE courses ADD COLUMN shared INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE lessons ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1;
+UPDATE settings SET key = 'goal:1' WHERE key = 'goal';
+CREATE INDEX lessons_user ON lessons(user_id, finished_at);
+CREATE INDEX sessions_user ON sessions(user_id);
+PRAGMA user_version = 1;
+";
+
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 1 {
+        // Vorhandene Daten vor dem Umbau sichern (lernen.v0.bak neben der Datenbank)
+        let backup = path.with_file_name("lernen.v0.bak");
+        let has_data: i64 = conn.query_row("SELECT COUNT(*) FROM courses", [], |r| r.get(0))?;
+        if has_data > 0 && !backup.exists() {
+            conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().into_owned()])?;
+        }
+        // foreign_keys lässt sich nur außerhalb einer Transaktion umschalten; ADD COLUMN mit Default braucht es aus.
+        conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V1} COMMIT; PRAGMA foreign_keys = ON;"))?;
+    }
     Ok(conn)
 }
 

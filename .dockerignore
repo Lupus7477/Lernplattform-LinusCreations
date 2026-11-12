@@ -1,0 +1,9 @@
+target
+.git
+.playwright-mcp
+dokumente
+data
+src-tauri/gen
+src-tauri/icons
+*.db
+*.db-*

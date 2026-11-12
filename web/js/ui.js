@@ -65,13 +65,31 @@ export function applyTheme(mode = pref.get("theme", "system")) {
 }
 
 // ---------- Rückmeldungen ----------
-export function toast(message) {
-  const el = h("div.toast", { role: "status", "aria-live": "polite" }, message);
-  document.body.append(el);
-  setTimeout(() => {
+/** Kurze Meldung. Mit `action` (z. B. „Rückgängig“) bleibt sie länger stehen. */
+export function toast(message, { action, onAction } = {}) {
+  const el = h("div.toast", { role: "status", "aria-live": "polite" }, h("span", message));
+  let gone = false;
+  const hide = () => {
+    if (gone) return;
+    gone = true;
     el.style.opacity = "0";
     setTimeout(() => el.remove(), 220);
-  }, 3200);
+  };
+  if (action) el.append(h("button.toast-action", { type: "button", onclick: () => (hide(), onAction()) }, action));
+  document.body.append(el);
+  setTimeout(hide, action ? 5000 : 3200);
+}
+
+/** Umschalter aus Knöpfen (aria-pressed). `options` = [[wert, text], …] */
+export function segmented(options, value, onPick, label) {
+  const btns = options.map(([v, text]) => h("button", { type: "button", "aria-pressed": String(v === value) }, text));
+  btns.forEach((b, i) =>
+    b.addEventListener("click", () => {
+      btns.forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+      onPick(options[i][0]);
+    }),
+  );
+  return h("div.segmented", { role: "group", "aria-label": label }, btns);
 }
 
 let audio;

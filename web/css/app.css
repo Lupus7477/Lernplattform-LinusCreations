@@ -1595,6 +1595,162 @@ textarea.input {
   }
 }
 
+/* ---------- Fragen bearbeiten ---------- */
+.hint {
+  font-size: 0.9rem;
+  color: var(--ink-2);
+}
+.q-box > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  list-style: none;
+  cursor: pointer;
+}
+.q-box > summary::-webkit-details-marker {
+  display: none;
+}
+.q-box[open] > summary .icon {
+  rotate: 180deg; /* Zustand, keine Bewegung: Nachschlagen soll nicht bremsen */
+}
+.q-list {
+  display: grid;
+  gap: 2px;
+}
+.q-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px 0;
+  border-bottom: 2px solid var(--line);
+}
+.q-item:last-child {
+  border-bottom: 0;
+}
+.q-item .row {
+  gap: 0;
+  margin-left: -12px;
+  flex-wrap: wrap;
+}
+.q-text {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.q-item.is-hidden .q-text,
+.q-item.is-hidden > .muted {
+  opacity: 0.55;
+}
+.opt-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+}
+.opt-row input[type="radio"] {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  accent-color: var(--right);
+}
+.form-error {
+  color: var(--wrong-ink);
+  font-weight: 600;
+}
+.input[aria-invalid="true"] {
+  border-color: var(--wrong);
+}
+
+.toast:has(.toast-action) {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-block: 6px;
+  padding-right: 6px;
+}
+.toast-action {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--paper) 14%, transparent);
+  color: var(--paper);
+  font: 800 0.95rem/1 var(--font-text);
+  cursor: pointer;
+  transition: background-color 160ms ease;
+}
+@media (hover: hover) and (pointer: fine) {
+  .toast-action:hover {
+    background: color-mix(in srgb, var(--paper) 24%, transparent);
+  }
+}
+
+/* ---------- Anmeldung, Konto, Server ---------- */
+.auth {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: calc(24px + env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom));
+}
+.auth .card {
+  width: min(100%, 420px);
+  gap: 16px;
+}
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--royal);
+  font: 800 1.3rem/1 var(--font-display);
+}
+.auth-brand .icon {
+  width: 30px;
+  height: 30px;
+}
+.list-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 2px 12px;
+  padding: 12px 0;
+  border-bottom: 2px solid var(--line);
+}
+.list-row:last-child {
+  border-bottom: 0;
+}
+.list-row > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.list-row b {
+  overflow-wrap: anywhere;
+}
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: var(--pill);
+  background: var(--royal-soft);
+  color: var(--royal);
+  font-size: 0.8rem;
+  font-weight: 700;
+  vertical-align: 0.1em;
+}
+.badge.off {
+  background: var(--wrong-soft);
+  color: var(--wrong-ink);
+}
+.link-box {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+.link-box .input {
+  font-size: 0.9rem;
+  text-overflow: ellipsis;
+}
+
 /* ---------- Weniger Bewegung ---------- */
 @media (prefers-reduced-motion: reduce) {
   *,

@@ -190,23 +190,24 @@ fn words(s: &str) -> Vec<String> {
 pub fn validate(qs: Vec<Question>) -> Vec<Question> {
     let mut seen = std::collections::HashSet::new();
     qs.into_iter()
-        .filter_map(fix)
+        .filter_map(|q| fix(q, true))
         .filter(|q| seen.insert(normalize(&q.prompt)))
         .collect()
 }
 
-fn fix(mut q: Question) -> Option<Question> {
+/// Bringt eine Frage in Form oder verwirft sie. `strict` = KI-Ausgabe; Nutzer-Bearbeitungen prüfen nur die Form.
+pub fn fix(mut q: Question, strict: bool) -> Option<Question> {
     q.prompt = q.prompt.trim().to_string();
     q.answer = q.answer.trim().to_string();
     q.why = q.why.trim().to_string();
     q.options = q.options.iter().map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect();
     let all = format!("{} {} {}", q.prompt, q.answer, q.options.join(" "));
     let w = words(&all);
-    if q.prompt.chars().count() < 8 || w.iter().any(|x| BANNED_WORDS.contains(&x.as_str())) {
+    if q.prompt.chars().count() < 8 || strict && w.iter().any(|x| BANNED_WORDS.contains(&x.as_str())) {
         return None;
     }
     // „Was ist X und welche Arten gibt es?“ = zwei Fragen in einer
-    if words(&q.prompt).iter().filter(|x| ASKS.contains(&x.as_str())).count() >= 2 {
+    if strict && words(&q.prompt).iter().filter(|x| ASKS.contains(&x.as_str())).count() >= 2 {
         return None;
     }
     match q.kind.as_str() {

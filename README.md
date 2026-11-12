@@ -1,34 +1,123 @@
 # Lernpfad
 
-Lern-App für die Prüfungsvorbereitung. Aus deinen PDF-Skripten entstehen kurze Lektionen mit Übungsfragen, ein Lernpfad, Wiederholungen und Streaks. Die KI läuft **komplett auf dem Gerät**: keine Cloud, kein Konto, nach dem ersten Start offline.
+Lern-App für die Prüfungsvorbereitung. Aus deinen PDF-Skripten entstehen kurze Lektionen mit Übungsfragen, ein Lernpfad, Wiederholungen und Streaks. Die KI läuft **auf deinem eigenen Gerät oder deinem eigenen Server**: keine Cloud, kein fremder Dienst.
 
-Läuft auf Linux, Windows, macOS, Android, iOS und iPadOS (eine Codebasis, [Tauri 2](https://v2.tauri.app)).
+## Vier Varianten, eine Codebasis
+
+| Variante | Was | Daten & KI |
+| --- | --- | --- |
+| **PC-App** (Linux, Windows, macOS) | Tauri-App | auf diesem Gerät, offline |
+| **Handy-App** (Android, iOS, iPadOS) | Tauri-App | auf diesem Gerät, offline |
+| **Server** | `lernpfad-server`, selbst gehostet | auf deinem Server, mit Konten |
+| **Web-App** | dieselbe Oberfläche im Browser, vom Server ausgeliefert | auf deinem Server |
+
+Die Apps laufen **immer lokal**. Optional verbinden sie sich mit deinem Server (Profil → Eigener Server) und kommen mit „Zurück zu lokal“ jederzeit zurück. Die lokalen Daten bleiben dabei unberührt.
 
 ## So funktioniert es
 
-1. **Hinzufügen:** PDF auswählen. Der Text wird auf dem Gerät gelesen (pdf.js) und in Abschnitte von etwa 5000 Zeichen geteilt. So wird das ganze Dokument abgedeckt.
-2. **Vorbereiten (KI, im Hintergrund):** Pro Abschnitt erzeugt die KI einen Titel, eine kurze Zusammenfassung und die wichtigsten Begriffe. Fragen entstehen erst, wenn eine Einheit dran ist; die nächste wird vorab vorbereitet.
-3. **Lernen (ohne KI):** Multiple Choice, Richtig/Falsch, Lückentext und Begriffe zuordnen. Die Antworten werden im Code geprüft, nicht von der KI. Falsche Aufgaben kommen am Ende der Lektion erneut.
-4. **Wiederholen:** Leitner-Boxen (1, 3, 7, 14, 30 Tage). Fällige Fragen landen im Tab „Wiederholen“.
+1. **Hinzufügen:** PDF auswählen. Der Text wird im Gerät bzw. Browser gelesen (pdf.js) und in Abschnitte von etwa 5000 Zeichen geteilt.
+2. **Vorbereiten (KI, im Hintergrund):** Pro Abschnitt erzeugt die KI Titel, Zusammenfassung und die wichtigsten Begriffe. Fragen entstehen, wenn eine Einheit dran ist; die nächste wird vorab vorbereitet.
+3. **Lernen (ohne KI):** Multiple Choice, Richtig/Falsch, Lückentext und Begriffe zuordnen. Die Antworten prüft der Code, nicht die KI.
+4. **Wiederholen:** Leitner-Boxen (1, 3, 7, 14, 30 Tage).
 5. **Motivation:** XP, Tagesziel, Streak, Lernstufe je Einheit.
 
-Die KI wird nur gebraucht für: Import, „Ausführlich erklären“ (einmal erzeugt, danach gespeichert), „Frag die KI“ und „Warum?“ nach einer falschen Antwort.
+### Fragen bearbeiten oder ausblenden
 
-## KI auf dem Gerät
+Unklar formuliert oder nicht prüfungsrelevant? In der Lektion über `⋯` oder auf der Lernkarte unter „Fragen dieser Einheit“:
+
+- **Bearbeiten:** gilt für alle, die den Kurs nutzen.
+- **Ausblenden:** nur für dich, mit „Rückgängig“. Sind alle Fragen einer Einheit ausgeblendet, schreibt die KI eine neue Runde.
+- **Für alle löschen:** nur der Besitzer eines geteilten Kurses.
+
+## KI
 
 | Stufe | Modell | Größe | Standard auf |
 | --- | --- | --- | --- |
 | Kompakt | Qwen3.5 2B (Q4_K_M) | 1,3 GB | Android, iOS |
-| Ausgewogen | Qwen3.5 4B (Q4_K_M) | 2,7 GB | Linux, Windows, macOS |
+| Ausgewogen | Qwen3.5 4B (Q4_K_M) | 2,7 GB | PC, Server |
 
-- llama.cpp ist als Bibliothek in die App eingebaut (`llama-cpp-2`). Nur so läuft KI auch auf iPhone und iPad, weil iOS keine nachgeladenen Programme erlaubt.
-- Bei jedem Start prüft die App das Modell und lädt es bei Bedarf herunter, auch abgebrochene Downloads werden fortgesetzt. Die URLs sind auf eine feste Hugging-Face-Revision gepinnt und die Dateigröße wird geprüft.
-- Das Modell wird erst geladen, wenn es gebraucht wird, und nach 3 Minuten Leerlauf wieder aus dem Speicher entfernt.
-- Sparsame Einstellungen: 4096 Token Kontext, KV-Cache in 8 Bit, alle Schichten auf der GPU (Vulkan unter Linux/Windows, Metal auf Apple-Geräten, CPU auf Android).
-- Strukturierte Ausgabe per JSON-Schema-Grammatik: Auch kleine Modelle liefern immer gültiges JSON.
-- Die Stufe lässt sich unter **Profil → KI auf diesem Gerät** wechseln.
+llama.cpp ist als Bibliothek eingebaut (`llama-cpp-2`). Das Modell wird beim ersten Start einmal von Hugging Face geladen (gepinnte Revision, Größe geprüft), danach läuft alles offline. Es wird erst geladen, wenn es gebraucht wird, und nach 3 Minuten Leerlauf entladen. GPU: Vulkan (Linux/Windows), Metal (Apple), CPU auf Android.
 
-Speicherort der Modelle und der Datenbank (`lernen.db`): der App-Datenordner, unter Linux `~/.local/share/de.lernpfad.app/`.
+## Eigener Server
+
+```bash
+cargo build --release -p lernpfad-server
+./target/release/lernpfad-server --data ./data --web ./web
+```
+
+Beim ersten Start schreibt der Server ins Protokoll:
+
+```
+Lernpfad-Server läuft: https://192.168.1.20:8443
+Eigenes Zertifikat, SHA-256-Fingerabdruck:
+  B2:53:41:…
+Noch kein Konto. Einrichten (einmalig, nur mit diesem Link):
+  https://192.168.1.20:8443/#/setup/908236…
+```
+
+1. **Einrichten:** Link öffnen, Name und Passwort festlegen. Dieses erste Konto ist Admin. Nur wer das Server-Protokoll sieht, kann den Server einrichten.
+2. **Einladen:** Profil → Mitglieder → „Jemanden einladen“. Der Link gilt 7 Tage und für ein Konto. Eine freie Registrierung gibt es nicht.
+3. **Teilen:** Kurs bearbeiten → „Mit allen auf diesem Server teilen“. Jeder behält seinen eigenen Fortschritt.
+4. **Handy:** Seite öffnen, „Zum Startbildschirm hinzufügen“. Oder die App über den Verbindungslink aus Profil → Konto verbinden.
+
+**Lokale Daten mitnehmen:** Die `lernen.db` der App vor dem ersten Start in den Datenordner kopieren. Dein Konto aus der Einrichtung übernimmt dann alle Kurse und den Fortschritt.
+
+**Docker:**
+
+```bash
+docker compose up -d --build
+docker compose logs lernpfad     # Einrichtungslink
+```
+
+Im Container kennt der Server die Adresse deines Rechners nicht. Trag sie in `compose.override.yaml` ein (wird nicht eingecheckt): `command: ["--host", "192.168.1.20"]`.
+
+### Automatisch aktualisieren
+
+Jeder Push auf `main` startet [.github/workflows/deploy.yml](.github/workflows/deploy.yml): GitHub baut das Image und schickt es per SSH an den Server. Dort lädt [deploy.sh](deploy.sh) es und startet den Container neu. Der Server kompiliert nichts, er braucht also keinen zusätzlichen RAM. Schlägt der Build fehl, läuft die alte Version weiter.
+
+Einmalig einrichten:
+
+1. Repo auf den Server klonen, z. B. nach `/home/Lernpfad`. Dort eine `compose.override.yaml` mit `command: ["--host", "<Server-IP>"]` anlegen.
+2. Einen eigenen SSH-Schlüssel ohne Passphrase nur für GitHub erzeugen und auf dem Server mit Zwangsbefehl in `authorized_keys` eintragen. Dieser Schlüssel kann dann nur `deploy.sh` starten:
+   `command="/home/Lernpfad/deploy.sh",restrict ssh-ed25519 AAAA… lernpfad-github-deploy`
+3. In GitHub unter Settings → Secrets and variables → Actions anlegen: `DEPLOY_HOST` (Server-IP), `DEPLOY_KEY` (privater Teil des Schlüssels), `DEPLOY_KNOWN_HOSTS` (Ausgabe von `ssh-keygen -F <Server-IP>`).
+
+Von Hand neu ausrollen: Actions → Deploy → „Run workflow“.
+
+### Optionen
+
+| Option | Wirkung |
+| --- | --- |
+| `--data DIR` | Datenbank, Modell, Zertifikat (Standard `./data`) |
+| `--web DIR` | Oberfläche (Standard `./web`) |
+| `--bind ADR` | Standard `0.0.0.0:8443` |
+| `--host NAME` | weiterer Name/IP fürs eigene Zertifikat, mehrfach möglich (erzeugt es neu) |
+| `--tls-cert`, `--tls-key` | echtes Zertifikat, z. B. Let's Encrypt oder `tailscale cert` |
+| `--behind-proxy` | HTTPS übernimmt ein Proxy davor (z. B. Caddy), Server lauscht nur auf 127.0.0.1 |
+| `--http` | ohne HTTPS, nur zum Entwickeln auf 127.0.0.1 |
+
+## Sicherheit des Servers
+
+Wer nur die Adresse kennt, bekommt die Anmeldeseite und sonst nichts. Jede Datenanfrage braucht eine gültige Sitzung, und bei jeder Kurs-, Einheiten- oder Fragen-ID wird geprüft, ob das Konto sie sehen darf. Fremde und nicht vorhandene IDs bekommen dieselbe Antwort.
+
+- **Passwörter:** Argon2id (19 MiB, 2 Durchläufe), mindestens 12 Zeichen. Rund 30 000 bekannte, geleakte Passwörter sind offline gesperrt, auch mit angehängten Ziffern („password123456“).
+- **Anmeldung:** Unbekannte Namen werden gegen einen Dummy-Hash geprüft. Das kostet gleich viel Zeit und ergibt dieselbe Meldung, so verrät die Antwort nicht, welche Namen es gibt.
+- **Sperr-Timer:**
+  - Pro (IP, Name) sind 3 Fehlversuche frei, danach 30 s Sperre, die sich bis auf 15 min verdoppelt.
+  - Pro IP: 20 Fehler pro Stunde sperren die IP für 1 h.
+  - Pro Name: 50 Fehler pro Stunde sperren den Namen für 15 min.
+  - Während einer Sperre rechnet der Server keinen Hash.
+- **Sitzungen:**
+  - Das Token besteht aus 32 Zufallsbytes, in der Datenbank steht nur sein SHA-256.
+  - Der Browser bekommt es als Cookie, das JavaScript nicht lesen kann (`__Host-…`, Secure, HttpOnly, SameSite=Strict).
+  - Ungenutzt abgemeldet nach 14 Tagen, spätestens nach 60 Tagen.
+  - Unter Profil → Angemeldete Geräte kannst du einzelne Geräte oder alle anderen abmelden.
+- **Transport:**
+  - Der Server spricht nur HTTPS. Klartext gibt es nur auf 127.0.0.1, sonst startet er nicht.
+  - Ohne eigenes Zertifikat erzeugt er eines und zeigt dessen Fingerabdruck. Die Apps pinnen genau dieses Zertifikat.
+  - Mit echtem Zertifikat sendet er auch HSTS.
+- **Verwaltung (Admin):** Konten sperren (sofort auf allen Geräten abgemeldet) und Passwort-Links ausstellen, wenn jemand sein Passwort vergessen hat.
+- Die Dateien selbst sind nicht verschlüsselt. Für den Fall, dass die Platte gestohlen wird, ist die Festplattenverschlüsselung des Systems da (LUKS, BitLocker, FileVault).
 
 ## Entwickeln
 
@@ -38,56 +127,40 @@ Speicherort der Modelle und der Datenbank (`lernen.db`): der App-Datenordner, un
 - Linux (Debian/Ubuntu/Mint):
   ```bash
   sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev libayatana-appindicator3-dev \
-    libxdo-dev cmake libclang-dev libvulkan-dev glslc
+    libxdo-dev cmake libclang-dev libvulkan-dev glslc spirv-headers
   ```
-- macOS: Xcode (für iOS zusätzlich die iOS-Plattform in Xcode)
+- macOS: Xcode (für iOS zusätzlich die iOS-Plattform)
 - Windows: Visual Studio Build Tools mit C++, CMake und das Vulkan SDK
 - Android: Android Studio mit SDK und NDK, JDK 17
 
 ### Starten
 
 ```bash
-cd src-tauri
-cargo tauri dev          # Desktop-App mit Neuladen
-cargo test               # Tests für Lernlogik und Import
-cargo tauri build        # Installationspaket für dieses System
+cargo test --workspace                     # Kern (Lernlogik, Rechte, Migration), Server (Anmeldung), App
+cd src-tauri && cargo tauri dev            # PC-App
+cargo run -p lernpfad-server -- --http     # Server zum Entwickeln: http://127.0.0.1:8080
+cargo tauri android dev                    # Android (vorher einmal: cargo tauri android init)
+cargo tauri ios dev                        # iOS, nur auf einem Mac
 ```
 
-Mobil:
-
-```bash
-cargo tauri android init && cargo tauri android dev
-cargo tauri ios init && cargo tauri ios dev      # nur auf einem Mac
-```
-
-Für iPhone/iPad brauchst du eine Apple-ID in Xcode (kostenlos: App läuft 7 Tage, Apple Developer Program: dauerhaft und TestFlight). Auf iOS läuft der Import nur, solange die App geöffnet ist.
-
-### Oberfläche ohne Tauri
-
-Die Oberfläche in `web/` kommt ohne Build-Schritt aus. Im Browser ersetzt `web/dev/mock-tauri.js` den Rust-Kern durch Beispieldaten:
-
-```bash
-python3 -m http.server 8765 -d web
-# http://127.0.0.1:8765/            KI lädt simuliert
-# http://127.0.0.1:8765/?ai=ready   KI sofort bereit
-# http://127.0.0.1:8765/?empty      ohne Kurse
-```
+Oberfläche ohne Rust: `python3 -m http.server 8765 -d web`. Dann ersetzt `web/dev/mock-tauri.js` den Kern durch Beispieldaten (`?ai=ready`, `?empty`, `?server`, `?server&login`).
 
 ## Aufbau
 
 ```
-src-tauri/src/
-  lib.rs      Tauri-Befehle für die Oberfläche
-  ai.rs       Modell-Download, Laden/Entladen, Text erzeugen (llama.cpp)
-  import.rs   Abschnitte, Prompts, Qualitätsfilter für Fragen, Hintergrund-Worker
-  learn.rs    Antwortprüfung, Leitner-Boxen, XP, Streak (ohne KI)
-  db.rs       SQLite-Schema
-web/
-  index.html, css/app.css, js/*.js   Oberfläche (Vanilla-JS-Module)
-  vendor/                            pdf.js, marked
-  fonts/, icons.svg                  Bricolage Grotesque, Figtree, Phosphor Icons
+core/src/            Crate lernpfad-core: alles, was App und Server teilen
+  api.rs             alle Befehle der Oberfläche + Rechteprüfung (Besitzer, Mitglied)
+  ai.rs              Modell-Download, Laden/Entladen, Text erzeugen (llama.cpp)
+  import.rs          Abschnitte, Prompts, Qualitätsfilter für Fragen, Hintergrund-Worker
+  learn.rs           Antwortprüfung, Leitner-Boxen, XP, Streak
+  db.rs              SQLite-Schema und Migration
+src-tauri/src/lib.rs Tauri-Hülle: lokal oder an den eigenen Server weiterleiten (Zertifikat gepinnt)
+server/src/
+  main.rs            HTTPS, Befehle, Ereignisse (SSE), Sicherheitsheader
+  auth.rs            Argon2id, Sitzungen, Passwortregeln, Sperr-Timer
+web/                 Oberfläche (Vanilla-JS-Module, kein Build-Schritt), für alle Varianten gleich
 ```
 
 ## Datenschutz
 
-Alles bleibt auf dem Gerät: Dokumente, Fortschritt und Chats. Die App geht nur ins Internet, um einmalig das KI-Modell von Hugging Face zu laden.
+In den Apps bleibt alles auf dem Gerät: Dokumente, Fortschritt und Chats. Auf dem eigenen Server liegt alles auf deinem Server. Ins Internet geht es nur, um einmalig das KI-Modell von Hugging Face zu laden.

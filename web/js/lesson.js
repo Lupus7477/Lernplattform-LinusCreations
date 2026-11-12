@@ -1,8 +1,8 @@
 // Lektion: eine Aufgabe nach der anderen, Prüfen ohne KI, falsche Aufgaben kommen am Ende erneut.
 import { call } from "./api.js";
-import { confetti, confirmSheet, countUp, h, icon, reduceMotion, shake, sound, toast } from "./ui.js";
+import { confetti, confirmSheet, countUp, h, icon, openSheet, reduceMotion, shake, sound, toast } from "./ui.js";
 import { emit, state, subscribe } from "./state.js";
-import { openChat } from "./unit.js";
+import { editQuestion, openChat } from "./unit.js";
 
 const LABEL = {
   mc: "Wähle die richtige Antwort",
@@ -27,11 +27,12 @@ export function openLesson(unitId, onExit) {
   const progress = h("div.progress", { role: "progressbar", "aria-label": "Fortschritt der Lektion", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": "0" }, fill);
   const combo = h("span.combo.hide", { "aria-live": "polite" });
   const closeBtn = h("button.icon-btn", { type: "button", "aria-label": "Lektion beenden" }, icon("x"));
+  const menuBtn = h("button.icon-btn", { type: "button", "aria-label": "Diese Frage bearbeiten oder ausblenden", hidden: true }, icon("dots-three"));
   const body = h("div.lesson-body", { tabindex: "-1" });
   const mainBtn = h("button.btn", { type: "button", disabled: true }, "Prüfen");
   const foot = h("div.lesson-foot", h("div.inner", mainBtn));
   const fb = h("div.feedback", { "aria-live": "assertive" });
-  const root = h("div.lesson", { role: "dialog", "aria-modal": "true", "aria-label": unitId ? "Lektion" : "Wiederholung" }, h("div.lesson-top", closeBtn, progress, combo), body, foot, fb);
+  const root = h("div.lesson", { role: "dialog", "aria-modal": "true", "aria-label": unitId ? "Lektion" : "Wiederholung" }, h("div.lesson-top", closeBtn, progress, combo, menuBtn), body, foot, fb);
   document.body.append(root);
   document.body.style.overflow = "hidden";
 
@@ -41,6 +42,7 @@ export function openLesson(unitId, onExit) {
   let firstRight = 0;
   let run = 0;
   let cur = null;
+  let lastOk = false;
   let phase = "loading"; // answer | checking | feedback | done
   let unsub = null;
   const t0 = Date.now();
@@ -174,6 +176,7 @@ export function openLesson(unitId, onExit) {
     setReady(false);
     mainBtn.textContent = "Prüfen";
     foot.hidden = ex.kind === "match";
+    menuBtn.hidden = !ex.id; // „Zuordnen“ kommt aus den Begriffen, nicht aus einer Frage
     cur.view = ex.kind === "mc" ? choice(ex) : ex.kind === "true_false" ? choice(ex, true) : ex.kind === "fill_blank" ? blank(ex) : match(ex);
     body.replaceChildren(
       ...[
@@ -214,6 +217,7 @@ export function openLesson(unitId, onExit) {
 
   function verdict(ok, expected, why) {
     phase = "feedback";
+    lastOk = ok;
     if (ok) {
       if (!cur.ex.retry) firstRight++;
       solved++;
@@ -257,14 +261,84 @@ export function openLesson(unitId, onExit) {
 
   function next() {
     if (phase !== "feedback") return;
+    advance();
+  }
+
+  function advance() {
     fb.classList.remove("open");
-    if (!queue.length) return finish();
+    if (!queue.length) return total ? finish() : exit();
     cur = { ex: queue.shift() };
     show();
   }
 
+  // ---------- Frage bearbeiten / ausblenden ----------
+  async function questionMenu() {
+    const ex = cur?.ex;
+    if (!ex?.id || (phase !== "answer" && phase !== "feedback")) return;
+    let q;
+    try {
+      q = await call("question", { questionId: ex.id });
+    } catch (e) {
+      return toast(String(e));
+    }
+    const edit = h("button.btn.secondary.block", { type: "button" }, icon("pencil-simple"), "Frage bearbeiten");
+    const hide = h("button.btn.secondary.block", { type: "button" }, icon("eye-slash"), "Frage ausblenden");
+    const del = q.mine && q.shared ? h("button.btn.ghost", { type: "button", style: { color: "var(--wrong)" } }, icon("trash"), "Für alle löschen") : null;
+    const s = openSheet({
+      title: "Diese Frage",
+      body: [h("p.muted", "Unklar formuliert oder nicht prüfungsrelevant?"), edit, hide, h("p.hint", "Ausgeblendet kommt sie bei dir in keiner Lektion und Wiederholung mehr vor."), del],
+    });
+    edit.addEventListener("click", () => {
+      s.close();
+      editQuestion(q, (saved) => {
+        // Aktuelle Aufgabe und spätere Wiederholungen derselben Frage übernehmen die neue Fassung.
+        for (const e of [cur.ex, ...queue]) {
+          if (e.id === saved.id) Object.assign(e, { prompt: saved.prompt, options: e.kind === "true_false" ? saved.options : shuffle(saved.options) });
+        }
+        if (phase === "answer") show();
+      });
+    });
+    hide.addEventListener("click", async () => {
+      s.close();
+      try {
+        await call("hide_question", { questionId: ex.id, hidden: true });
+      } catch (e) {
+        return toast(String(e));
+      }
+      drop(ex);
+      toast("Ausgeblendet.", { action: "Rückgängig", onAction: () => call("hide_question", { questionId: ex.id, hidden: false }).catch((e) => toast(String(e))) });
+    });
+    del?.addEventListener("click", async () => {
+      s.close();
+      const yes = await confirmSheet({
+        title: "Für alle löschen?",
+        text: "Die Frage verschwindet für alle in diesem Kurs, auch ihr Fortschritt. Das lässt sich nicht rückgängig machen.",
+        confirm: "Endgültig löschen",
+        danger: true,
+      });
+      if (!yes) return;
+      try {
+        await call("delete_question", { questionId: ex.id });
+      } catch (e) {
+        return toast(String(e));
+      }
+      drop(ex);
+      toast("Gelöscht.");
+    });
+  }
+
+  /** Frage aus dieser Lektion nehmen: nie gelöst → zählt nicht mehr zur Gesamtzahl. */
+  function drop(ex) {
+    if (cur?.ex.id !== ex.id) return;
+    queue = queue.filter((e) => e.id !== ex.id);
+    if (!(phase === "feedback" && lastOk)) total = Math.max(0, total - 1);
+    updateProgress();
+    advance();
+  }
+
   async function finish() {
     phase = "done";
+    menuBtn.hidden = true;
     let res;
     try {
       res = await call("finish_lesson", { unitId, correct: firstRight, total });
@@ -346,12 +420,14 @@ export function openLesson(unitId, onExit) {
 
   function message(ic, title, text, actions = []) {
     foot.hidden = true;
+    menuBtn.hidden = true;
     body.replaceChildren(h("div.empty", h("div.art", icon(ic)), h("h1", title), h("p", text), ...actions, h("button.btn.secondary", { type: "button", onclick: exit }, "Zurück")));
   }
 
   // ---------- Steuerung ----------
   mainBtn.addEventListener("click", () => (phase === "done" ? exit() : check()));
   closeBtn.addEventListener("click", askClose);
+  menuBtn.addEventListener("click", questionMenu);
 
   async function askClose() {
     if (phase === "done" || phase === "loading" || total === 0) return exit();

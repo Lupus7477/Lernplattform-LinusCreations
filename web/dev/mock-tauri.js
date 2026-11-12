@@ -1,6 +1,6 @@
 // Nur für die Entwicklung im Browser (ohne Tauri): ahmt den Rust-Kern mit Beispieldaten nach.
 // Wird von main.js ausschließlich geladen, wenn window.__TAURI__ fehlt.
-// Parameter: ?ai=ready (KI sofort bereit), ?empty (ohne Kurse)
+// Parameter: ?ai=ready (KI sofort bereit), ?empty (ohne Kurse), ?server (als Server-Konto), ?server&login (Anmeldung)
 
 const q = new URLSearchParams(location.search);
 const listeners = {};
@@ -28,7 +28,7 @@ if (ai.state !== "ready") {
 
 const db = {
   goal: 20,
-  courses: q.has("empty") ? [] : [{ id: 1, name: "Mikroökonomie", exam_date: day(-23), created_at: 1 }],
+  courses: q.has("empty") ? [] : [{ id: 1, name: "Mikroökonomie", exam_date: day(-23), created_at: 1, owner_id: 1, shared: false }],
   documents: [
     { id: 1, course_id: 1, name: "VL01_Markt_und_Preis.pdf" },
     { id: 2, course_id: 1, name: "VL02_Elastizitaeten.pdf" },
@@ -68,7 +68,7 @@ const db = {
     [2, "true_false", "Bei einem Nachfrageüberschuss steigt der Preis tendenziell.", ["Richtig", "Falsch"], "Richtig", "Knappheit lässt Käufer mehr bieten."],
     [3, "mc", "Der Preis für Tinte steigt stark. Was passiert mit der Nachfrage nach Druckern?", ["Sie sinkt", "Sie steigt", "Sie bleibt gleich", "Sie wird unendlich elastisch"], "Sie sinkt", "Drucker und Tinte sind Komplemente."],
     [4, "mc", "Die Elastizität beträgt -0,4. Wie reagiert die Nachfrage?", ["Unelastisch", "Elastisch", "Vollkommen elastisch", "Gar nicht"], "Unelastisch", "Der Betrag ist kleiner als 1."],
-  ].map(([unit_id, kind, prompt, options, answer, why], i) => ({ id: i + 1, unit_id, kind, prompt, options, answer, why, box: i % 4 === 1 ? 2 : 0, due_at: i % 4 === 1 ? now() - 10 : 0 })),
+  ].map(([unit_id, kind, prompt, options, answer, why], i) => ({ id: i + 1, unit_id, kind, prompt, options, answer, why, box: i % 4 === 1 ? 2 : 0, due_at: i % 4 === 1 ? now() - 10 : 0, hidden: false })),
   lessons: q.has("empty")
     ? []
     : [
@@ -79,6 +79,16 @@ const db = {
   nextId: 100,
 };
 if (q.has("empty")) db.units = [];
+const visible = () => db.questions.filter((x) => !x.hidden);
+let user = q.has("server") && !q.has("login") ? { name: "Alex", admin: true } : null;
+const sessions = [
+  { id: 1, label: "Firefox · Linux", ip: "192.168.1.20", last_seen: now() - 60, current: true },
+  { id: 2, label: "Lernpfad-App · Android", ip: "192.168.1.31", last_seen: now() - 3 * DAY, current: false },
+];
+const members = [
+  { id: 1, name: "Alex", admin: true, disabled: false, me: true },
+  { id: 2, name: "Sam", admin: false, disabled: false, me: false },
+];
 
 function streak() {
   const days = [...new Set(db.lessons.map((l) => Math.floor((l.at - new Date().getTimezoneOffset() * 60) / DAY)))].sort((a, b) => b - a);
@@ -97,7 +107,7 @@ function stats() {
     goal: db.goal,
     total_xp: db.lessons.reduce((a, l) => a + l.xp, 0),
     lessons: db.lessons.length,
-    due: db.questions.filter((x) => x.box > 0 && x.due_at <= now()).length,
+    due: visible().filter((x) => x.box > 0 && x.due_at <= now()).length,
     week,
     active_days: [...new Set(db.lessons.map((l) => new Date(l.at * 1000).toLocaleDateString("sv-SE")))],
   };
@@ -144,14 +154,17 @@ const handlers = {
   courses: () =>
     db.courses.map((c) => {
       const us = db.units.filter((u) => u.course_id === c.id);
-      return { ...c, units: us.length, ready: us.filter((u) => u.status === "ready").length, documents: db.documents.filter((d) => d.course_id === c.id).map((d) => d.name) };
+      return { ...c, mine: true, owner: user?.name || "Ich", units: us.length, ready: us.filter((u) => u.status === "ready").length, documents: db.documents.filter((d) => d.course_id === c.id).map((d) => d.name) };
     }),
   create_course: ({ name, examDate }) => {
     const id = db.nextId++;
-    db.courses.push({ id, name, exam_date: examDate, created_at: now() });
+    db.courses.push({ id, name, exam_date: examDate, created_at: now(), owner_id: 1, shared: false });
     return id;
   },
-  update_course: ({ id, name, examDate }) => Object.assign(db.courses.find((c) => c.id === id), { name, exam_date: examDate }),
+  update_course: ({ id, name, examDate, shared }) => {
+    const c = db.courses.find((x) => x.id === id);
+    Object.assign(c, { name, exam_date: examDate }, shared == null ? {} : { shared });
+  },
   delete_course: ({ id }) => {
     db.courses = db.courses.filter((c) => c.id !== id);
     db.units = db.units.filter((u) => u.course_id !== id);
@@ -170,7 +183,7 @@ const handlers = {
     db.units
       .filter((u) => u.course_id === courseId)
       .map((u) => {
-        const qs = db.questions.filter((x) => x.unit_id === u.id);
+        const qs = visible().filter((x) => x.unit_id === u.id);
         return {
           ...u,
           document: db.documents.find((d) => d.id === u.document_id).name,
@@ -193,7 +206,7 @@ const handlers = {
   },
   ask: ({ onToken }) => streamText("Gute Frage! Bei einem **höheren Preis** lohnt sich der Kauf für weniger Menschen. Deshalb sinkt die nachgefragte Menge, solange alles andere gleich bleibt.", onToken),
   start_lesson: ({ unitId }) => {
-    const pool = unitId == null ? db.questions.filter((x) => x.box > 0 && x.due_at <= now()) : db.questions.filter((x) => x.unit_id === unitId);
+    const pool = unitId == null ? visible().filter((x) => x.box > 0 && x.due_at <= now()) : visible().filter((x) => x.unit_id === unitId);
     if (!pool.length && unitId != null) return { ready: false, failed: false, exercises: [] };
     const ex = shuffle(pool)
       .slice(0, 8)
@@ -219,7 +232,44 @@ const handlers = {
   },
   set_goal: ({ xp }) => (db.goal = xp),
   retry_questions: () => null,
+  unit_questions: ({ unitId }) => db.questions.filter((x) => x.unit_id === unitId).map(full),
+  question: ({ questionId }) => full(db.questions.find((x) => x.id === questionId)),
+  update_question: ({ questionId, prompt, options, answer, why }) => {
+    const x = db.questions.find((y) => y.id === questionId);
+    if (prompt.trim().length < 8) throw "So geht die Frage nicht: Sie braucht mindestens 8 Zeichen.";
+    if (x.kind === "true_false") options = ["Richtig", "Falsch"];
+    if (!options.some((o) => norm(o) === norm(answer))) throw "So geht die Frage nicht: Die richtige Antwort muss unter den Optionen stehen.";
+    Object.assign(x, { prompt: prompt.trim(), options, answer: options.find((o) => norm(o) === norm(answer)), why: why.trim() });
+    return full(x);
+  },
+  hide_question: ({ questionId, hidden }) => (db.questions.find((x) => x.id === questionId).hidden = hidden),
+  delete_question: ({ questionId }) => (db.questions = db.questions.filter((x) => x.id !== questionId)),
+  // Server-Modus (?server): Konto, Geräte, Mitglieder
+  session: () => (q.has("server") ? { mode: "server", user, setup: false } : { mode: "local", user: null }),
+  login: ({ name, password }) => {
+    if (password !== "richtig-gutes-passwort") {
+      if (++fails >= 4) throw { locked: 30, message: "Zu viele Versuche." };
+      throw "Name oder Passwort stimmt nicht.";
+    }
+    user = { name, admin: true };
+    return { ok: true };
+  },
+  logout: () => (user = null),
+  sessions_list: () => sessions,
+  session_revoke: ({ id }) => sessions.splice(sessions.findIndex((x) => x.id === id), 1),
+  sessions_revoke_others: () => sessions.splice(0, sessions.length, ...sessions.filter((x) => x.current)),
+  change_password: ({ current }) => {
+    if (current !== "richtig-gutes-passwort") throw "Das aktuelle Passwort stimmt nicht.";
+  },
+  members: () => members,
+  member_disable: ({ id, disabled }) => (members.find((m) => m.id === id).disabled = disabled),
+  invite_create: ({ userId }) => ({ link: `${location.origin}/#/${userId ? "reset" : "join"}/c0ffee${Date.now().toString(16)}`, expires_at: now() + 7 * DAY }),
+  connect_link: () => ({ link: `lernpfad://${location.host}#sha256=AB:CD:EF` }),
 };
+let fails = 0;
+function full(x) {
+  return { id: x.id, unit_id: x.unit_id, kind: x.kind, prompt: x.prompt, options: x.options, answer: x.answer, why: x.why, hidden: x.hidden, mine: true, shared: !!db.courses[0]?.shared };
+}
 
 class Channel {
   onmessage = null;
@@ -228,10 +278,11 @@ class Channel {
 window.__TAURI__ = {
   core: {
     Channel,
-    async invoke(cmd, args = {}) {
+    // wie src-tauri/src/lib.rs: rpc(cmd, args) und rpc_stream(cmd, args, onToken)
+    async invoke(_name, { cmd, args = {}, onToken } = {}) {
       await wait(60);
       if (!handlers[cmd]) throw `Unbekannter Befehl: ${cmd}`;
-      return structuredClone(await handlers[cmd](args));
+      return structuredClone((await handlers[cmd]({ ...args, onToken })) ?? null);
     },
   },
   event: {

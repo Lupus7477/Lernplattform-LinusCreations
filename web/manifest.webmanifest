@@ -1,0 +1,16 @@
+{
+  "name": "Lernpfad",
+  "short_name": "Lernpfad",
+  "description": "Aus deinen Skripten werden Lektionen, Übungsfragen und Wiederholungen.",
+  "lang": "de",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f1f3f8",
+  "theme_color": "#2d47d8",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
