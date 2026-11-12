@@ -2,6 +2,7 @@ services:
   lernpfad:
     build: .
     image: lernpfad
+    init: true  # reicht SIGTERM weiter: Neustarts beim Deploy sofort statt nach 10 s Zwangsstopp
     ports:
       - "8443:8443"
     volumes:
