@@ -1465,6 +1465,71 @@ textarea.input {
   align-items: center;
   overflow-wrap: anywhere;
 }
+/* Lange Kursnamen umbrechen statt die Seite zu verbreitern */
+.course-card h3 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* Eigenes PDF: Name, dann Ersetzen und (abgesetzt) Löschen */
+.course-card .doc {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 4px 8px;
+  align-items: center;
+}
+.course-card .doc .name {
+  overflow-wrap: anywhere;
+}
+.course-card .doc .del {
+  margin-left: 8px;
+  color: var(--wrong-ink);
+}
+.course-card .doc .icon-btn .icon {
+  width: 22px;
+  height: 22px;
+}
+
+/* Personen zum Teilen */
+.people {
+  display: grid;
+  gap: 2px;
+  max-height: 46dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.person {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.person:hover {
+  background: var(--paper);
+}
+.person input {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  accent-color: var(--royal);
+}
+.person:has(input:disabled) {
+  cursor: default;
+  color: var(--ink-2);
+}
+
+/* Falsche wiederholen: eine Zeile pro Kurs */
+.wrong-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+.wrong-row b {
+  overflow-wrap: anywhere;
+}
 
 /* ---------- Profil ---------- */
 .hero-stat {
@@ -2014,19 +2079,56 @@ textarea.input {
   font-size: 1.05rem;
 }
 
-/* Grafik beschriften */
+/* Grafik beschriften: Rahmen, Bühne (Breite = Zoom, per JS), Zoom-Leiste darunter */
+.figure-box {
+  display: grid;
+  gap: 6px;
+}
 .figure-wrap {
   padding: 14px; /* Platz für die Nummern am Rand */
   border-radius: var(--r);
   border: 2px solid var(--line);
   background: #fff; /* Folien sind hell, auch im Dunkelmodus */
+  touch-action: pan-x pan-y; /* zwei Finger zoomen das Bild, nicht die Seite */
 }
-.figure-wrap.scroll {
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
+/* Nur gezoomt scrollt der Rahmen; sonst würde er Begriffe abschneiden, die aus der Auswahl hineinfliegen. */
+.figure-wrap.zoomed {
+  max-height: calc(var(--fig-max, 60dvh) + 28px);
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 .figure {
   position: relative;
+  max-width: none;
+  margin-inline: auto;
+}
+.zoom-bar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 2px;
+}
+.zoom-bar .icon-btn .icon {
+  width: 22px;
+  height: 22px;
+}
+.zoom-bar button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+.zoom-pct {
+  min-width: 64px;
+  height: 44px;
+  border: 0;
+  border-radius: var(--pill);
+  background: none;
+  color: var(--ink-2);
+  font: 700 0.85rem/1 var(--font-text);
+  cursor: pointer;
+}
+.zoom-pct:hover,
+.zoom-bar .icon-btn:hover:not(:disabled) {
+  background: var(--paper);
 }
 .figure img {
   display: block;

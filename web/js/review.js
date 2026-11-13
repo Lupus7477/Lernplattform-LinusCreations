@@ -1,10 +1,10 @@
-// Wiederholen: fällige Fragen über alle Kurse + Begriffe durchsuchen.
+// Wiederholen: fällige Fragen über alle Kurse, falsche je Kurs gezielt üben, Begriffe durchsuchen.
 import { call } from "./api.js";
 import { h, icon } from "./ui.js";
-import { loadStats, subscribe } from "./state.js";
+import { loadCourses, loadStats, subscribe } from "./state.js";
 
 export async function render() {
-  const stats = await loadStats();
+  const [stats, courses] = await Promise.all([loadStats(), loadCourses()]);
   const results = h("div.terms", { "aria-live": "polite" });
   const search = h("input.input", { id: "term-search", type: "search", autocomplete: "off", placeholder: "z. B. Elastizität" });
 
@@ -33,10 +33,27 @@ export async function render() {
     : h("div.empty", h("div.art", icon("seal-check-fill")), h("h2", "Alles wiederholt"), h("p", "Fragen kommen zur Wiederholung zurück, kurz bevor du sie vergessen würdest."));
   dueCard.querySelector(".hero-stat .icon")?.style.setProperty("color", "var(--royal)");
 
+  // Richtig beantwortet verschwindet eine Frage hier und kommt nach ein paar Tagen in der Wiederholung oben zurück.
+  const wrong = courses.filter((c) => c.wrong > 0);
+  const wrongCard = h(
+    "div.card",
+    h("h2", "Falsche wiederholen"),
+    wrong.length
+      ? wrong.map((c) =>
+          h(
+            "div.wrong-row",
+            h("div", h("b", c.name), h("p.muted.num", c.wrong === 1 ? "1 Frage zuletzt falsch" : `${c.wrong} Fragen zuletzt falsch`)),
+            h("a.btn.secondary", { href: `#/lesson/wrong-${c.id}` }, "Üben"),
+          ),
+        )
+      : h("p.muted", "Keine falschen Fragen. Was du falsch beantwortest, kannst du hier gezielt üben."),
+  );
+
   const page = h(
     "div.page",
     h("h1", "Wiederholen"),
     dueCard,
+    wrongCard,
     h("div.card", h("h2", "Begriffe"), h("div.field", h("label", { for: "term-search" }, "Begriff suchen"), search), results),
   );
   page.cleanup = subscribe((kind) => kind === "course-updated" && find());

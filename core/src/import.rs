@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::ai::{Ai, AiError, Gen, Msg};
@@ -83,6 +83,63 @@ fn split_long(text: &str, max: usize) -> Vec<String> {
         }
     }
     parts
+}
+
+/// Folien-PDFs wiederholen sich: Animationsschritte (Seite n+1 = Seite n plus ein Punkt), wiederholte Agenda, dieselbe Folie doppelt.
+/// Solche Seiten werden geleert, damit die KI nichts doppelt liest; die Seitenzahlen der übrigen bleiben.
+/// Seitenzahlen sowie Kopf- und Fußzeilen fallen weg. Gibt die bereinigten Seiten und die Zahl der übersprungenen zurück.
+// ponytail: Vergleich nur mit der vorigen behaltenen Seite (Animationsschritte) und exakt gleichen Seiten. Ähnlichkeitsmaß, falls Folien leicht umformuliert wiederkommen.
+pub fn dedupe_pages(pages: &[String]) -> (Vec<String>, usize) {
+    // Vergleichsform ohne Ziffern: „Folie 12“ und „Folie 13“ sind dieselbe Fußzeile.
+    let bare = |l: &str| normalize(l).replace(|c: char| c.is_ascii_digit(), "").split_whitespace().collect::<Vec<_>>().join(" ");
+    // Kopf- und Fußzeilen: dieselbe Zeile auf ≥ 60 % von mindestens 5 Seiten mit Text.
+    let frequent = |ps: Vec<&Vec<String>>| -> HashSet<String> {
+        let mut n: HashMap<String, usize> = HashMap::new();
+        for p in &ps {
+            for k in p.iter().map(|l| bare(l)).collect::<HashSet<_>>() {
+                *n.entry(k).or_default() += 1;
+            }
+        }
+        n.into_iter().filter(|(_, c)| ps.len() >= 5 && c * 10 >= ps.len() * 6).map(|(k, _)| k).collect()
+    };
+    // Zeilen ohne Buchstaben (Seitenzahlen, „12 / 40“) fallen sofort weg.
+    let lines: Vec<Vec<String>> = pages.iter().map(|p| clean(p).lines().filter(|l| l.chars().any(char::is_alphabetic)).map(String::from).collect()).collect();
+    // Beim Vergleich zählen häufige Zeilen nicht. Endgültig gestrichen wird erst nach dem Entdoppeln,
+    // sonst verlöre eine Folie mit vielen Animationsschritten ihre Überschrift.
+    let noise = frequent(lines.iter().filter(|p| !p.is_empty()).collect());
+    let keys: Vec<Vec<String>> = lines.iter().map(|p| p.iter().filter(|l| !noise.contains(&bare(l))).map(|l| normalize(l)).collect()).collect();
+    let joined: Vec<String> = keys.iter().map(|k| k.join(" ")).collect();
+    // Seite b enthält Seite a: alle Zeilen von a stehen in b, oder der Text von a steht am Stück in b.
+    let within = |a: usize, b: usize| {
+        let set: HashSet<&String> = keys[b].iter().collect();
+        keys[a].iter().all(|l| set.contains(l)) || joined[b].contains(&joined[a])
+    };
+    let mut drop = vec![false; pages.len()];
+    let mut seen = HashSet::new();
+    let mut last: Option<usize> = None;
+    for i in 0..pages.len() {
+        if joined[i].is_empty() {
+            continue;
+        }
+        if !seen.insert(joined[i].clone()) {
+            drop[i] = true;
+            continue;
+        }
+        match last {
+            Some(j) if within(j, i) => drop[j] = true,
+            Some(j) if within(i, j) => {
+                drop[i] = true;
+                continue;
+            }
+            _ => {}
+        }
+        last = Some(i);
+    }
+    let boiler = frequent((0..pages.len()).filter(|&i| !drop[i] && !lines[i].is_empty()).map(|i| &lines[i]).collect());
+    let out = (0..pages.len())
+        .map(|i| if drop[i] { String::new() } else { lines[i].iter().filter(|l| !boiler.contains(&bare(l))).cloned().collect::<Vec<_>>().join("\n") })
+        .collect();
+    (out, drop.iter().filter(|d| **d).count())
 }
 
 // ---------- KI-Ausgabe-Formate ----------
@@ -328,6 +385,23 @@ pub fn verify_task(ai: &Ai, text: &str, q: Question) -> Result<Option<Question>,
     }
 }
 
+/// Nach dem Ersetzen eines PDFs: Stimmt die Frage noch? Die KI löst sie blind am neuen Text; weicht ihre Antwort ab, ist sie veraltet (None).
+/// Strukturaufgaben laufen durch die Selbstprüfung (Matrix darf Aussagen verlieren), Grafik-Aufgaben bleiben.
+pub fn recheck(ai: &Ai, text: &str, q: Question) -> Result<Option<Question>, AiError> {
+    if !matches!(q.kind.as_str(), "mc" | "true_false" | "fill_blank") {
+        return verify_task(ai, text, q);
+    }
+    #[derive(Deserialize)]
+    struct R {
+        answer: String,
+    }
+    let schema = json!({"type": "object", "required": ["answer"], "properties": {"answer": {"enum": q.options}}});
+    let opts = q.options.iter().map(|o| format!("- {o}")).collect::<Vec<_>>().join("\n");
+    let user = format!("Lernmaterial:\n<<<\n{text}\n>>>\n\nFrage: {}\nAntworten:\n{opts}\nWelche Antwort stimmt laut Lernmaterial?", q.prompt);
+    let r: R = ask_json(ai, user, &schema, 80)?;
+    Ok((normalize(&r.answer) == normalize(&q.answer)).then_some(q))
+}
+
 // ---------- Qualitätsfilter im Code statt langer Prompt-Regeln ----------
 
 const BANNED_WORDS: [&str; 6] = ["seite", "seiten", "kapitel", "skript", "folie", "folien"];
@@ -507,6 +581,7 @@ pub fn spawn_worker(db: Db, ai: Arc<Ai>, wake: Receiver<()>, notify: impl Fn(i64
         let what = match &task {
             Task::Analyze { unit_id, .. } => format!("Analyse Einheit {unit_id}"),
             Task::Questions { unit_id, level, .. } => format!("Fragen Einheit {unit_id} (Stufe {level})"),
+            Task::Recheck { unit_id, .. } => format!("Prüfung Einheit {unit_id}"),
         };
         match run_task(&db, &ai, task, &notify) {
             Ok(course_id) => {
@@ -551,6 +626,8 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
                 "UPDATE units SET title = ?1, summary = ?2, status = 'ready' WHERE id = ?3",
                 params![title, info.summary.trim(), unit_id],
             );
+            // Nach dem Ersetzen wird neu analysiert: alte Begriffe raus, sonst doppeln sie sich.
+            let _ = conn.execute("DELETE FROM terms WHERE unit_id = ?1", [unit_id]);
             for t in info.terms.iter().filter(|t| !t.term.trim().is_empty()) {
                 let _ = conn.execute(
                     "INSERT INTO terms(unit_id, term, definition) VALUES(?1, ?2, ?3)",
@@ -559,7 +636,7 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
             }
             // Die ersten 2 Einheiten eines Kurses bekommen sofort Fragen.
             let _ = conn.execute(
-                "UPDATE units SET q_state = 1 WHERE id = ?1 AND (SELECT COUNT(*) FROM units WHERE course_id = ?2 AND q_state > 0) < 2",
+                "UPDATE units SET q_state = 1 WHERE id = ?1 AND q_state = 0 AND (SELECT COUNT(*) FROM units WHERE course_id = ?2 AND q_state > 0) < 2",
                 params![unit_id, course_id],
             );
             Ok(course_id)
@@ -571,7 +648,8 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
                 let course_id: i64 = conn.query_row("SELECT course_id FROM units WHERE id = ?1", [unit_id], |r| r.get(0)).unwrap_or(0);
                 match result {
                     Ok(qs) if qs.len() >= 3 => {
-                        for q in &qs {
+                        let mut have = prompts(&conn, unit_id);
+                        for q in qs.iter().filter(|q| have.insert(normalize(&q.prompt))) {
                             let _ = insert_question(&conn, unit_id, q, level, None);
                         }
                         let _ = conn.execute("UPDATE units SET q_state = 2, q_level = ?1 WHERE id = ?2", params![level, unit_id]);
@@ -604,12 +682,68 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
                 Err(e) => eprintln!("[import] Strukturaufgaben Einheit {unit_id}: {e}"),
             }
             let conn = db.lock().unwrap();
-            for t in &tasks {
+            let mut have = prompts(&conn, unit_id);
+            for t in tasks.iter().filter(|t| have.insert(normalize(&t.prompt))) {
                 let _ = insert_question(&conn, unit_id, t, level, None);
             }
             Ok(course_id)
         }
+        Task::Recheck { unit_id, text } => {
+            let failed = |e: rusqlite::Error| AiError::Failed(e.to_string());
+            let (course_id, qs) = {
+                let conn = db.lock().unwrap();
+                let course_id: i64 = conn.query_row("SELECT course_id FROM units WHERE id = ?1", [unit_id], |r| r.get(0)).map_err(failed)?;
+                (course_id, stored_questions(&conn, unit_id).map_err(failed)?)
+            };
+            // KI ohne Datenbank-Sperre; scheitert eine Prüfung, bleibt die Frage im Zweifel.
+            let mut verdicts = Vec::new();
+            for (id, q) in qs {
+                match recheck(ai, &text, q.clone()) {
+                    Ok(v) => verdicts.push((id, q, v)),
+                    Err(AiError::NotReady) => return Err(AiError::NotReady),
+                    Err(AiError::Failed(e)) => eprintln!("[import] Prüfung Frage {id}: {e}"),
+                }
+            }
+            let conn = db.lock().unwrap();
+            let mut gone = 0;
+            for (id, q, v) in verdicts {
+                match v {
+                    None => {
+                        let _ = conn.execute("DELETE FROM questions WHERE id = ?1", [id]);
+                        gone += 1;
+                    }
+                    Some(v) if v != q => {
+                        let (options, groups) = (serde_json::to_string(&v.options).unwrap(), serde_json::to_string(&v.groups).unwrap());
+                        let _ = conn.execute("UPDATE questions SET options = ?1, answer = ?2, groups = ?3 WHERE id = ?4", params![options, v.answer, groups, id]);
+                    }
+                    _ => {}
+                }
+            }
+            eprintln!("[import] Prüfung Einheit {unit_id}: {gone} veraltete Fragen entfernt");
+            // „Hinzufügen“: eine neue Runde für den neuen Inhalt, auf derselben Stufe (Questions nimmt q_level + 1).
+            let _ = conn.execute("UPDATE units SET q_state = 1, q_level = MAX(q_level - 1, 0) WHERE id = ?1 AND q_state = 4", [unit_id]);
+            Ok(course_id)
+        }
     }
+}
+
+/// Vorhandene Aufgaben einer Einheit (Vergleichsform), damit eine neue Runde nichts doppelt einfügt.
+fn prompts(conn: &Connection, unit_id: i64) -> HashSet<String> {
+    let Ok(mut st) = conn.prepare("SELECT prompt FROM questions WHERE unit_id = ?1") else { return HashSet::new() };
+    let rows = st.query_map([unit_id], |r| r.get::<_, String>(0));
+    rows.map(|rows| rows.filter_map(Result::ok).map(|p| normalize(&p)).collect()).unwrap_or_default()
+}
+
+fn stored_questions(conn: &Connection, unit_id: i64) -> rusqlite::Result<Vec<(i64, Question)>> {
+    fn json<T: DeserializeOwned + Default>(s: String) -> T {
+        serde_json::from_str(&s).unwrap_or_default()
+    }
+    let mut st = conn.prepare("SELECT id, kind, prompt, options, answer, why, groups, spots FROM questions WHERE unit_id = ?1")?;
+    let rows = st.query_map([unit_id], |r| {
+        let q = Question { kind: r.get(1)?, prompt: r.get(2)?, options: json(r.get(3)?), answer: r.get(4)?, why: r.get(5)?, groups: json(r.get(6)?), spots: json(r.get(7)?) };
+        Ok((r.get(0)?, q))
+    })?;
+    rows.collect()
 }
 
 pub fn insert_question(conn: &Connection, unit_id: i64, q: &Question, level: i64, figure_id: Option<i64>) -> rusqlite::Result<i64> {
@@ -646,13 +780,30 @@ pub fn valid_image(s: &str) -> bool {
             .any(|b64| !b64.is_empty() && b64.bytes().all(|c| c.is_ascii_alphanumeric() || b"+/=".contains(&c)))
 }
 
+/// Animationsschritte und wiederholte Folien liefern dieselbe Grafik mehrfach. Es bleibt nur, was neu ist:
+/// kein gleiches Bild vorher und keine Beschriftungen, die eine andere Grafik schon alle (und mehr) hat.
+fn distinct_figures(fs: &[&FigureIn]) -> Vec<bool> {
+    let labels: Vec<HashSet<String>> = fs.iter().map(|f| f.spots.iter().map(|s| normalize(&s.label)).collect()).collect();
+    (0..fs.len())
+        .map(|i| {
+            !(0..fs.len()).any(|j| {
+                let same = fs[i].image == fs[j].image || (!labels[i].is_empty() && labels[i] == labels[j]);
+                j != i && ((same && j < i) || (!labels[i].is_empty() && labels[i].len() < labels[j].len() && labels[i].is_subset(&labels[j])))
+            })
+        })
+        .collect()
+}
+
 /// Grafiken eines Dokuments der passenden Einheit zuordnen (Seite liegt darin oder am nächsten dran).
 /// Ab 3 Beschriftungen entsteht direkt eine Beschriftungsaufgabe, Ablenker kommen aus den anderen Grafiken.
-pub fn store_figures(conn: &Connection, document_id: i64, figures: &[FigureIn]) -> rusqlite::Result<usize> {
+/// `skip` = Bilder, die schon gespeichert sind (PDF ersetzt, Grafik unverändert).
+pub fn store_figures(conn: &Connection, document_id: i64, figures: &[FigureIn], skip: &HashSet<String>) -> rusqlite::Result<usize> {
     let mut rng = learn::Shuffler::new();
     let mut stored = 0;
-    for (i, f) in figures.iter().take(MAX_FIGURES).enumerate() {
-        if !valid_image(&f.image) {
+    let figures: Vec<&FigureIn> = figures.iter().take(MAX_FIGURES).filter(|f| valid_image(&f.image)).collect();
+    let keep = distinct_figures(&figures);
+    for (i, f) in figures.iter().enumerate() {
+        if !keep[i] || skip.contains(&f.image) {
             continue;
         }
         let unit: Option<i64> = conn
@@ -683,9 +834,29 @@ pub fn store_figures(conn: &Connection, document_id: i64, figures: &[FigureIn]) 
     Ok(stored)
 }
 
+/// Ergebnis von Einlesen und Ersetzen. `units` = neue Einheiten.
+#[derive(Serialize, Default, Debug, PartialEq)]
+pub struct Report {
+    pub units: usize,
+    pub same: usize,
+    pub changed: usize,
+    pub removed: usize,
+    pub figures: usize,
+    /// doppelte Seiten, die nicht in die Analyse gingen
+    pub skipped: usize,
+}
+
+fn insert_unit(conn: &Connection, course_id: i64, doc_id: i64, idx: i64, s: &Section) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT INTO units(course_id, document_id, idx, page_from, page_to, title, source_text) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![course_id, doc_id, idx, s.from as i64, s.to as i64, format!("Seiten {}-{}", s.from, s.to), s.text],
+    )
+}
+
 /// Speichert ein neues Dokument und legt pro Abschnitt eine wartende Einheit an.
-pub fn store_document(db: &Db, course_id: i64, name: &str, pages: &[String], figures: &[FigureIn]) -> rusqlite::Result<(i64, usize, usize)> {
-    let secs = sections(pages, SECTION_CHARS);
+pub fn store_document(db: &Db, course_id: i64, name: &str, pages: &[String], figures: &[FigureIn]) -> rusqlite::Result<Report> {
+    let (pages, skipped) = dedupe_pages(pages);
+    let secs = sections(&pages, SECTION_CHARS);
     let mut conn = db.lock().unwrap();
     let tx = conn.transaction()?;
     tx.execute(
@@ -693,17 +864,117 @@ pub fn store_document(db: &Db, course_id: i64, name: &str, pages: &[String], fig
         params![course_id, name, pages.len() as i64, db::now()],
     )?;
     let doc_id = tx.last_insert_rowid();
-    let mut idx: i64 = tx.query_row("SELECT COALESCE(MAX(idx) + 1, 0) FROM units WHERE course_id = ?1", [course_id], |r| r.get(0))?;
-    for s in &secs {
-        tx.execute(
-            "INSERT INTO units(course_id, document_id, idx, page_from, page_to, title, source_text) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![course_id, doc_id, idx, s.from as i64, s.to as i64, format!("Seiten {}-{}", s.from, s.to), s.text],
-        )?;
-        idx += 1;
+    let idx: i64 = tx.query_row("SELECT COALESCE(MAX(idx) + 1, 0) FROM units WHERE course_id = ?1", [course_id], |r| r.get(0))?;
+    for (i, s) in secs.iter().enumerate() {
+        insert_unit(&tx, course_id, doc_id, idx + i as i64, s)?;
     }
-    let figs = store_figures(&tx, doc_id, figures)?;
+    let figures = store_figures(&tx, doc_id, figures, &HashSet::new())?;
+    // Ohne Text bleibt nichts liegen: der Aufrufer meldet „eingescannt?“
+    if !secs.is_empty() {
+        tx.commit()?;
+    }
+    Ok(Report { units: secs.len(), figures, skipped, ..Default::default() })
+}
+
+/// Ersetzt ein PDF. Gleiche Abschnitte behalten Einheit, Fragen und Fortschritt. Geänderte werden neu analysiert,
+/// ihre Fragen prüft danach die KI (q_state 4). Neue kommen dazu, weggefallene werden samt Fragen gelöscht.
+// ponytail: Zuordnung per Wort-Jaccard ≥ 0,5, gierig in Abschnittsreihenfolge. Verschiebt eine neue Seite die Grenzen, gelten Nachbarn als geändert und werden geprüft.
+pub fn replace_document(db: &Db, doc_id: i64, name: &str, pages: &[String], figures: &[FigureIn]) -> rusqlite::Result<Report> {
+    let (pages, skipped) = dedupe_pages(pages);
+    let secs = sections(&pages, SECTION_CHARS);
+    let mut r = Report { skipped, ..Default::default() };
+    if secs.is_empty() {
+        return Ok(r);
+    }
+    let mut conn = db.lock().unwrap();
+    let tx = conn.transaction()?;
+    let course_id: i64 = tx.query_row("SELECT course_id FROM documents WHERE id = ?1", [doc_id], |r| r.get(0))?;
+    let old: Vec<(i64, i64, String)> = {
+        let mut st = tx.prepare("SELECT id, idx, source_text FROM units WHERE document_id = ?1 ORDER BY idx")?;
+        let rows = st.query_map([doc_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    // (alte Einheit, unverändert?) je neuem Abschnitt: erst exakt gleiche Texte, dann die ähnlichsten
+    let mut matched: Vec<Option<(usize, bool)>> = vec![None; secs.len()];
+    let mut used = vec![false; old.len()];
+    for (i, s) in secs.iter().enumerate() {
+        let n = normalize(&s.text);
+        if let Some(j) = (0..old.len()).find(|&j| !used[j] && normalize(&old[j].2) == n) {
+            used[j] = true;
+            matched[i] = Some((j, true));
+        }
+    }
+    let bag = |t: &str| words(t).into_iter().collect::<HashSet<_>>();
+    let old_bags: Vec<HashSet<String>> = old.iter().map(|o| bag(&o.2)).collect();
+    for (i, s) in secs.iter().enumerate() {
+        if matched[i].is_some() {
+            continue;
+        }
+        let b = bag(&s.text);
+        let sim = |o: &HashSet<String>| b.intersection(o).count() as f64 / b.union(o).count().max(1) as f64;
+        let best = (0..old.len()).filter(|&j| !used[j]).map(|j| (j, sim(&old_bags[j]))).max_by(|x, y| x.1.total_cmp(&y.1));
+        if let Some((j, _)) = best.filter(|&(_, v)| v >= 0.5) {
+            used[j] = true;
+            matched[i] = Some((j, false));
+        }
+    }
+    for (j, o) in old.iter().enumerate() {
+        if !used[j] {
+            tx.execute("DELETE FROM units WHERE id = ?1", [o.0])?;
+            r.removed += 1;
+        }
+    }
+    // Die Einheiten des Dokuments behalten ihren Platz im Pfad; spätere Dokumente rücken um die Differenz.
+    let base = old.first().map(|o| o.1).unwrap_or(0);
+    let delta = secs.len() as i64 - old.len() as i64;
+    if delta != 0 {
+        tx.execute(
+            "UPDATE units SET idx = idx + ?1 WHERE course_id = ?2 AND document_id != ?3 AND idx >= ?4",
+            params![delta, course_id, doc_id, base + old.len() as i64],
+        )?;
+    }
+    for (i, s) in secs.iter().enumerate() {
+        let idx = base + i as i64;
+        match matched[i] {
+            Some((j, true)) => {
+                tx.execute("UPDATE units SET idx = ?1, page_from = ?2, page_to = ?3 WHERE id = ?4", params![idx, s.from as i64, s.to as i64, old[j].0])?;
+                r.same += 1;
+            }
+            Some((j, false)) => {
+                // Neuer Text: Titel und Begriffe neu, Erklärung neu; vorhandene Fragen prüft danach die KI.
+                tx.execute(
+                    "UPDATE units SET idx = ?1, page_from = ?2, page_to = ?3, source_text = ?4, explanation = NULL, status = 'pending',
+                       q_state = CASE WHEN q_state >= 2 AND EXISTS(SELECT 1 FROM questions WHERE unit_id = ?5) THEN 4 WHEN q_state = 3 THEN 0 ELSE q_state END
+                     WHERE id = ?5",
+                    params![idx, s.from as i64, s.to as i64, s.text, old[j].0],
+                )?;
+                r.changed += 1;
+            }
+            None => {
+                insert_unit(&tx, course_id, doc_id, idx, s)?;
+                r.units += 1;
+            }
+        }
+    }
+    tx.execute("UPDATE documents SET name = ?1, pages = ?2 WHERE id = ?3", params![name, pages.len() as i64, doc_id])?;
+    // Gleiche Bilder behalten ihre Aufgaben samt Fortschritt; weggefallene Grafiken nehmen ihre Beschriftungsaufgaben mit.
+    let new_images: HashSet<&str> = figures.iter().map(|f| f.image.as_str()).collect();
+    let old_figs: Vec<(i64, String)> = {
+        let mut st = tx.prepare("SELECT f.id, f.image FROM figures f JOIN units u ON u.id = f.unit_id WHERE u.document_id = ?1 AND f.page IS NOT NULL")?;
+        let rows = st.query_map([doc_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut kept = HashSet::new();
+    for (id, image) in old_figs {
+        if new_images.contains(image.as_str()) {
+            kept.insert(image);
+        } else {
+            tx.execute("DELETE FROM figures WHERE id = ?1", [id])?;
+        }
+    }
+    r.figures = store_figures(&tx, doc_id, figures, &kept)?;
     tx.commit()?;
-    Ok((doc_id, secs.len(), figs))
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -767,6 +1038,11 @@ mod tests {
         assert!(!info.title.is_empty() && info.terms.len() >= 2);
         assert!(qs.len() >= 3, "zu wenige brauchbare Fragen");
 
+        // Nach dem Ersetzen: Fragen zum selben Text sollten die Prüfung fast alle bestehen
+        let t = std::time::Instant::now();
+        let kept = qs.iter().filter(|q| recheck(&ai, &secs[0].text, (*q).clone()).expect("Prüfung").is_some()).count();
+        println!("\nPrüfung in {:.1} s: {kept} von {} Fragen bleiben", t.elapsed().as_secs_f32(), qs.len());
+
         // Strukturaufgaben mit Selbstprüfung: SWOT-Text soll eine Matrix ergeben, Marktformen keine erfundene.
         for (name, text, level) in [("swot", include_str!("../testdata/swot.txt"), 1), ("swot", include_str!("../testdata/swot.txt"), 2), ("marktformen", text, 1)] {
             let t = std::time::Instant::now();
@@ -820,6 +1096,48 @@ mod tests {
         assert_eq!((t.answer.as_str(), t.options.clone()), ("1 Wurzel · 2 Blatt", vec!["Blüte".to_string()]));
         assert!(fix(Question { spots: vec![spot(0.9, "zu weit rechts")], ..q("label", "Beschrifte die Grafik.", &[], "") }, false).is_none());
         assert!(valid_image("data:image/png;base64,iVBORw0KGgo=") && !valid_image("data:image/svg+xml;base64,PHN2Zz4=") && !valid_image("data:image/png;base64,<script>"));
+    }
+
+    #[test]
+    fn dedupes_pages() {
+        let footer = |n: usize| format!("Prof. Muster · Uni Beispiel\nFolie {n}\n{n}");
+        let pages: Vec<String> = [
+            "Agenda\nMarkt\nPreis",
+            "Markt\nAngebot trifft Nachfrage",                         // Animationsschritt …
+            "Markt\nAngebot trifft Nachfrage\nViele Anbieter: Polypol", // … vollständig
+            "Agenda\nMarkt\nPreis",                                    // Agenda wiederholt
+            "Preis\nDer Preis entsteht am Markt",
+            "",
+            "Elastizität\nWie stark reagiert die Menge",
+            "Monopol\nEin Anbieter setzt den Preis",
+            "Oligopol\nWenige Anbieter beobachten sich",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, p)| if p.is_empty() { String::new() } else { format!("{p}\n{}", footer(i + 1)) })
+        .collect();
+        let (out, skipped) = dedupe_pages(&pages);
+        assert_eq!((out.len(), skipped), (9, 2));
+        assert!(out[1].is_empty() && out[3].is_empty() && out[5].is_empty());
+        assert_eq!(out[0], "Agenda\nMarkt\nPreis"); // Fußzeile und Seitenzahl weg
+        assert_eq!(out[2], "Markt\nAngebot trifft Nachfrage\nViele Anbieter: Polypol");
+        assert_eq!(out[8], "Oligopol\nWenige Anbieter beobachten sich");
+        // Wenige Seiten: Überschriften bleiben, nichts wird als Fußzeile gestrichen
+        let (out, skipped) = dedupe_pages(&["Markt\nA".into(), "Markt\nB".into()]);
+        assert_eq!((out, skipped), (vec!["Markt\nA".to_string(), "Markt\nB".to_string()], 0));
+    }
+
+    #[test]
+    fn distinct_figures_drop_steps() {
+        let fig = |image: &str, labels: &[&str]| FigureIn {
+            page: 1,
+            title: String::new(),
+            image: image.into(),
+            spots: labels.iter().map(|l| Spot { x: 0.1, y: 0.1, w: 0.1, h: 0.1, label: l.to_string() }).collect(),
+        };
+        let fs = [fig("a", &["Wurzel", "Blatt"]), fig("b", &["Wurzel", "Blatt", "Blüte"]), fig("b", &[]), fig("c", &["Blüte", "blatt", "Wurzel"]), fig("d", &[])];
+        let refs: Vec<&FigureIn> = fs.iter().collect();
+        assert_eq!(distinct_figures(&refs), vec![false, true, false, false, true]);
     }
 
     #[test]

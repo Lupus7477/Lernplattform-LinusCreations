@@ -336,7 +336,7 @@ async fn rpc(State(s): State<Arc<Srv>>, ConnectInfo(peer): ConnectInfo<SocketAdd
     }
     let limit = match (public, cmd.as_str()) {
         (true, _) => 16 * 1024,
-        (_, "import_document" | "import_figures") => 64 * 1024 * 1024,
+        (_, "import_document" | "replace_document") => 64 * 1024 * 1024,
         // eigene Aufgabe mit Foto (data:-URL, bis 2 MB im Kern)
         (_, "create_question" | "update_question") => 4 * 1024 * 1024,
         _ => 1024 * 1024,

@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS documents(
   id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
   name TEXT NOT NULL, pages INTEGER NOT NULL, created_at INTEGER NOT NULL);
 -- status: pending (wartet auf Analyse) | ready
--- q_state: 0 keine Fragen, 1 gewünscht, 2 vorhanden, 3 fehlgeschlagen
+-- q_state: 0 keine Fragen, 1 gewünscht, 2 vorhanden, 3 fehlgeschlagen, 4 nach Ersetzen des PDFs prüfen
 CREATE TABLE IF NOT EXISTS units(
   id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
   document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -80,6 +80,17 @@ CREATE INDEX figures_unit ON figures(unit_id);
 PRAGMA user_version = 2;
 ";
 
+/// Version 3: „zuletzt falsch“ je Frage und Nutzer, Kurse mit ausgewählten Personen teilen.
+/// `shared = 1` bleibt „alle auf dem Server“; `members_invite` = Mitglieder dürfen weitere Personen hinzufügen.
+const V3: &str = "
+ALTER TABLE progress ADD COLUMN wrong INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE course_members(course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY(course_id, user_id)) WITHOUT ROWID;
+CREATE INDEX course_members_user ON course_members(user_id);
+ALTER TABLE courses ADD COLUMN members_invite INTEGER NOT NULL DEFAULT 0;
+PRAGMA user_version = 3;
+";
+
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
@@ -96,6 +107,9 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     }
     if version < 2 {
         conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V2} COMMIT; PRAGMA foreign_keys = ON;"))?;
+    }
+    if version < 3 {
+        conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V3} COMMIT; PRAGMA foreign_keys = ON;"))?;
     }
     Ok(conn)
 }
@@ -122,10 +136,12 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Resul
     Ok(())
 }
 
-/// Nächste Hintergrund-Aufgabe: gewünschte Fragen zuerst, dann noch nicht analysierte Abschnitte.
+/// Nächste Hintergrund-Aufgabe: gewünschte Fragen zuerst, dann noch nicht analysierte Abschnitte,
+/// zuletzt Fragen geänderter Abschnitte prüfen (PDF ersetzt).
 pub enum Task {
     Questions { unit_id: i64, level: i64, text: String },
     Analyze { unit_id: i64, course_id: i64, idx: i64, page_from: i64, page_to: i64, text: String },
+    Recheck { unit_id: i64, text: String },
 }
 
 pub fn next_task(conn: &Connection) -> rusqlite::Result<Option<Task>> {
@@ -139,19 +155,29 @@ pub fn next_task(conn: &Connection) -> rusqlite::Result<Option<Task>> {
     if q.is_some() {
         return Ok(q);
     }
+    let a = conn
+        .query_row(
+            "SELECT id, course_id, idx, page_from, page_to, source_text FROM units WHERE status = 'pending' ORDER BY course_id, idx LIMIT 1",
+            [],
+            |r| {
+                Ok(Task::Analyze {
+                    unit_id: r.get(0)?,
+                    course_id: r.get(1)?,
+                    idx: r.get(2)?,
+                    page_from: r.get(3)?,
+                    page_to: r.get(4)?,
+                    text: r.get(5)?,
+                })
+            },
+        )
+        .optional()?;
+    if a.is_some() {
+        return Ok(a);
+    }
     conn.query_row(
-        "SELECT id, course_id, idx, page_from, page_to, source_text FROM units WHERE status = 'pending' ORDER BY course_id, idx LIMIT 1",
+        "SELECT id, source_text FROM units WHERE status = 'ready' AND q_state = 4 ORDER BY course_id, idx LIMIT 1",
         [],
-        |r| {
-            Ok(Task::Analyze {
-                unit_id: r.get(0)?,
-                course_id: r.get(1)?,
-                idx: r.get(2)?,
-                page_from: r.get(3)?,
-                page_to: r.get(4)?,
-                text: r.get(5)?,
-            })
-        },
+        |r| Ok(Task::Recheck { unit_id: r.get(0)?, text: r.get(1)? }),
     )
     .optional()
 }

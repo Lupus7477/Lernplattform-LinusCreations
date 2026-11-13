@@ -1,6 +1,6 @@
 // Lektion: eine Aufgabe nach der anderen, Prüfen ohne KI, falsche Aufgaben kommen am Ende erneut.
 import { call } from "./api.js";
-import { confetti, confirmSheet, countUp, flip, h, icon, openSheet, reduceMotion, shake, sound, toast } from "./ui.js";
+import { confetti, confirmSheet, countUp, flip, h, icon, openSheet, reduceMotion, shake, sound, toast, zoomable } from "./ui.js";
 import { emit, state, subscribe } from "./state.js";
 import { editQuestion, openChat } from "./unit.js";
 
@@ -27,7 +27,8 @@ function shuffle(a) {
   return b;
 }
 
-export function openLesson(unitId, onExit) {
+/** Lektion einer Einheit (`unitId`), „Falsche wiederholen“ eines Kurses (`wrongCourse`) oder die tägliche Wiederholung (beides leer). */
+export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
   const fill = h("i");
   const progress = h("div.progress", { role: "progressbar", "aria-label": "Fortschritt der Lektion", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": "0" }, fill);
   const combo = h("span.combo.hide", { "aria-live": "polite" });
@@ -172,7 +173,12 @@ export function openLesson(unitId, onExit) {
         const r = el.getBoundingClientRect();
         return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
       };
-      const zi = zones.findIndex((z) => inside(z.el));
+      // Im gezoomten Bild zählt eine Stelle nur, wenn sie gerade zu sehen ist.
+      const visible = (el) => {
+        const clip = el.closest(".figure-wrap.zoomed");
+        return !clip || inside(clip);
+      };
+      const zi = zones.findIndex((z) => inside(z.el) && visible(z.el));
       return zi >= 0 ? zi : inside(bank) ? "bank" : -1;
     };
     chips.forEach((c) =>
@@ -339,9 +345,9 @@ export function openLesson(unitId, onExit) {
     };
   }
 
-  /** Grafik beschriften: nummerierte Stellen über dem Bild, Begriffe darunter. */
+  /** Grafik beschriften: nummerierte Stellen über dem Bild (zoombar), Begriffe darunter. */
   function figure(ex) {
-    const img = h("img", { src: ex.image, alt: "Grafik zum Beschriften", draggable: "false" });
+    const img = h("img", { alt: "Grafik zum Beschriften", draggable: "false" });
     const stage = h("div.figure", img);
     const zones = ex.spots.map(([x, y, w, hh], i) => {
       // Mittelpunkt auf die Beschriftung, Mindestgröße per CSS: lesbar auch bei kleinen Stellen am Handy
@@ -349,27 +355,22 @@ export function openLesson(unitId, onExit) {
       stage.append(el);
       return { el, list: el, name: `Stelle ${i + 1}`, cap: 1 };
     });
-    const wrap = h("div.figure-wrap", stage);
-    // Liegen Stellen in einer Zeile zu dicht (z. B. Länder auf einer Karte), wird das Bild breiter und scrollt waagerecht.
-    // Sonst kein overflow: der Rahmen würde Begriffe abschneiden, die aus der Auswahl hineinfliegen.
+    // Liegen Stellen in einer Zeile zu dicht (z. B. Länder auf einer Karte), startet das Bild vergrößert:
+    // Mittelpunkte sollen mindestens 56 px auseinander liegen.
     // ponytail: „gleiche Zeile“ = Mittelpunkte < 6 % der Höhe auseinander; genügt für Folien.
-    requestAnimationFrame(() => {
-      let dx = 1;
-      ex.spots.forEach(([x1, y1, w1, h1], i) =>
-        ex.spots.slice(i + 1).forEach(([x2, y2, w2, h2]) => {
-          if (Math.abs(y1 + h1 / 2 - (y2 + h2 / 2)) < 0.06) dx = Math.min(dx, Math.abs(x1 + w1 / 2 - (x2 + w2 / 2)));
-        }),
-      );
-      const need = Math.min(1400, Math.ceil(56 / Math.max(dx, 0.01)));
-      if (need <= wrap.clientWidth - 28) return;
-      stage.style.minWidth = `${need}px`;
-      wrap.classList.add("scroll");
-    });
+    let dx = 1;
+    ex.spots.forEach(([x1, y1, w1, h1], i) =>
+      ex.spots.slice(i + 1).forEach(([x2, y2, w2, h2]) => {
+        if (Math.abs(y1 + h1 / 2 - (y2 + h2 / 2)) < 0.06) dx = Math.min(dx, Math.abs(x1 + w1 / 2 - (x2 + w2 / 2)));
+      }),
+    );
+    const zoom = zoomable(stage, img, { start: (base) => 56 / Math.max(dx, 0.01) / base });
+    img.src = ex.image;
     const bank = h("div.bank");
     const pl = placer({ options: ex.options, zones, bank, ready: (n) => n.every((x) => x === 1) });
     const words = () => zones.map((_, i) => pl.inZone(i)[0]?.textContent ?? "");
     return {
-      el: h("div.stack", wrap, bank, pl.live),
+      el: h("div.stack", zoom.el, bank, pl.live),
       key: pl.key,
       value: () => words(),
       text: () => words().map((w, i) => `${i + 1} ${w || "–"}`).join(" · "),
@@ -436,7 +437,7 @@ export function openLesson(unitId, onExit) {
     const label = ex.kind === "sort" && ex.groups.length === 4 ? "Fülle die Matrix" : LABEL[ex.kind];
     body.replaceChildren(
       ...[
-        h("p.q-kind", ex.retry ? `Nochmal: ${label}` : label),
+        h("p.q-kind", ex.retry ? `Nochmal: ${label}` : ex.refresh ? `Auffrischen: ${label}` : label),
         ["fill_blank", "cloze", "match"].includes(ex.kind) ? null : h("h1.q-prompt", ex.prompt),
         cur.view.el,
       ].filter(Boolean),
@@ -493,7 +494,7 @@ export function openLesson(unitId, onExit) {
         ? h("button.btn.secondary", {
             type: "button",
             onclick: () =>
-              openChat(unitId, "", {
+              openChat(ex.refresh ? null : unitId, "", {
                 shown: "Warum ist das so?",
                 sent: `Frage: ${ex.prompt}\nRichtige Antwort: ${expected}\nMeine Antwort: ${cur.view.text?.() ?? cur.view.value()}\nErkläre mir in 3-4 einfachen Sätzen, warum die richtige Antwort stimmt.`,
               }),
@@ -645,7 +646,7 @@ export function openLesson(unitId, onExit) {
     body.replaceChildren(h("div.stack", h("div.skeleton", { style: { width: "40%" } }), h("div.skeleton", { style: { height: "36px" } }), h("div.skeleton", { style: { height: "62px" } }), h("div.skeleton", { style: { height: "62px" } })));
     let res;
     try {
-      res = await call("start_lesson", { unitId });
+      res = await call("start_lesson", { unitId, wrongCourse });
     } catch (e) {
       return message("warning", "Die Lektion konnte nicht starten", String(e));
     }
@@ -655,7 +656,11 @@ export function openLesson(unitId, onExit) {
       ]);
     }
     if (!res.ready) return wait();
-    if (!res.exercises.length) return message("seal-check-fill", "Gerade ist nichts fällig", "Fragen kommen zur Wiederholung zurück, kurz bevor du sie vergessen würdest.");
+    if (!res.exercises.length) {
+      return wrongCourse
+        ? message("seal-check-fill", "Keine falschen Fragen mehr", "Was du hier richtig hattest, kommt in ein paar Tagen in der Wiederholung zurück.")
+        : message("seal-check-fill", "Gerade ist nichts fällig", "Fragen kommen zur Wiederholung zurück, kurz bevor du sie vergessen würdest.");
+    }
     queue = res.exercises;
     total = queue.length;
     updateProgress();

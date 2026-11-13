@@ -19,6 +19,7 @@ fn err(e: impl std::fmt::Display) -> String {
 
 /// Gleiche Meldung für „gibt es nicht“ und „gehört jemand anderem“: so lässt sich nicht durchprobieren, was existiert.
 pub const DENIED: &str = "Kein Zugriff";
+const NO_TEXT: &str = "In diesem PDF wurde kein Text gefunden. Ist es eingescannt?";
 
 /// Erste `n` Zeichen (nicht Bytes), damit Umlaute nicht zerschnitten werden.
 fn head(s: &str, n: usize) -> &str {
@@ -63,8 +64,31 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
             ok(create_course(c, who, &name, exam_date)?)
         }
         "update_course" => {
-            let (id, name, exam_date, shared) = args!(v, { id: i64, name: String, exam_date: Option<String>, shared: Option<bool> });
-            ok(update_course(c, who, id, &name, exam_date, shared)?)
+            let (id, name, exam_date, share, members, members_invite) =
+                args!(v, { id: i64, name: String, exam_date: Option<String>, share: Option<String>, members: Option<Vec<i64>>, members_invite: Option<bool> });
+            ok(update_course(c, who, id, &name, exam_date, share.as_deref(), members, members_invite)?)
+        }
+        // Personen, mit denen man teilen kann (aktive Konten des Servers), mit Häkchen, wer schon drin ist
+        "share_people" => {
+            let course_id = args!(v, { course_id: i64 });
+            let conn = c.db.lock().unwrap();
+            may_invite(&conn, who, course_id)?;
+            let mut st = conn
+                .prepare(
+                    "SELECT u.id, u.name, EXISTS(SELECT 1 FROM course_members m WHERE m.course_id = ?1 AND m.user_id = u.id)
+                     FROM users u JOIN courses c ON c.id = ?1
+                     WHERE u.pw_hash IS NOT NULL AND u.disabled = 0 AND u.id != c.owner_id AND u.id != ?2 ORDER BY u.name COLLATE NOCASE",
+                )
+                .map_err(err)?;
+            let rows = st.query_map(params![course_id, who.id], |r| Ok(Person { id: r.get(0)?, name: r.get(1)?, member: r.get(2)? })).map_err(err)?;
+            ok(rows.collect::<Result<Vec<_>, _>>().map_err(err)?)
+        }
+        // Mitglied mit Einladerecht: nur hinzufügen, nie entfernen
+        "invite_to_course" => {
+            let (course_id, user_ids) = args!(v, { course_id: i64, user_ids: Vec<i64> });
+            let conn = c.db.lock().unwrap();
+            may_invite(&conn, who, course_id)?;
+            ok(add_members(&conn, course_id, &user_ids)?)
         }
         "delete_course" => {
             let id = args!(v, { id: i64 });
@@ -75,25 +99,30 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
         "import_document" => {
             let (course_id, name, pages, figures) = args!(v, { course_id: i64, name: String, pages: Vec<String>, figures: Option<Vec<import::FigureIn>> });
             owner(role(&c.db.lock().unwrap(), who, course_id)?)?;
-            let (_, units, figures) = import::store_document(&c.db, course_id, head(name.trim(), 200), &pages, &figures.unwrap_or_default()).map_err(err)?;
-            if units == 0 {
-                return Err("In diesem PDF wurde kein Text gefunden. Ist es eingescannt?".into());
+            let r = import::store_document(&c.db, course_id, head(name.trim(), 200), &pages, &figures.unwrap_or_default()).map_err(err)?;
+            if r.units == 0 {
+                return Err(NO_TEXT.into());
             }
             c.wake();
-            ok(Imported { units, figures })
+            ok(r)
         }
-        // Grafiken für ein schon eingelesenes PDF nachladen (dieselbe Datei noch einmal gewählt)
-        "import_figures" => {
-            let (document_id, figures) = args!(v, { document_id: i64, figures: Vec<import::FigureIn> });
+        // Geändertes PDF: gleiche Abschnitte bleiben, geänderte prüft die KI, neue kommen dazu, weggefallene gehen.
+        "replace_document" => {
+            let (document_id, name, pages, figures) = args!(v, { document_id: i64, name: String, pages: Vec<String>, figures: Option<Vec<import::FigureIn>> });
+            doc_owner(&c.db.lock().unwrap(), who, document_id)?;
+            let r = import::replace_document(&c.db, document_id, head(name.trim(), 200), &pages, &figures.unwrap_or_default()).map_err(err)?;
+            if r.same + r.changed + r.units == 0 {
+                return Err(NO_TEXT.into());
+            }
+            c.wake();
+            ok(r)
+        }
+        // Mit dem PDF gehen Einheiten, Fragen, Grafiken und der Fortschritt darin; XP-Historie bleibt (lessons.unit_id → NULL).
+        "delete_document" => {
+            let document_id = args!(v, { document_id: i64 });
             let conn = c.db.lock().unwrap();
-            let course: i64 = conn
-                .query_row("SELECT course_id FROM documents WHERE id = ?1", [document_id], |r| r.get(0))
-                .optional()
-                .map_err(err)?
-                .ok_or(DENIED)?;
-            owner(role(&conn, who, course)?)?;
-            let figures = import::store_figures(&conn, document_id, &figures).map_err(err)?;
-            ok(Imported { units: 0, figures })
+            doc_owner(&conn, who, document_id)?;
+            ok(conn.execute("DELETE FROM documents WHERE id = ?1", [document_id]).map_err(err)?)
         }
         "figure" => {
             let figure_id = args!(v, { figure_id: i64 });
@@ -113,14 +142,17 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
         "search_terms" => {
             let query = args!(v, { query: String });
             let like = format!("%{}%", head(query.trim(), 100));
-            ok(unit_terms(&c.db.lock().unwrap(), "WHERE (c.owner_id = ?2 OR c.shared = 1) AND (t.term LIKE ?1 OR t.definition LIKE ?1)", params![like, who.id])?)
+            ok(unit_terms(&c.db.lock().unwrap(), &format!("WHERE {} AND (t.term LIKE ?1 OR t.definition LIKE ?1)", can_see("?2")), params![like, who.id])?)
         }
         "explain" => ok(explain(c, who, args!(v, { unit_id: i64 }), on_token)?),
         "ask" => {
             let (unit_id, messages) = args!(v, { unit_id: Option<i64>, messages: Vec<ChatIn> });
             ok(ask(c, who, unit_id, messages, on_token)?)
         }
-        "start_lesson" => ok(start_lesson(c, who, args!(v, { unit_id: Option<i64> }))?),
+        "start_lesson" => {
+            let (unit_id, wrong_course) = args!(v, { unit_id: Option<i64>, wrong_course: Option<i64> });
+            ok(start_lesson(c, who, unit_id, wrong_course)?)
+        }
         "answer" => {
             let (question_id, given, retry) = args!(v, { question_id: i64, given: String, retry: bool });
             ok(answer(c, who, question_id, &given, retry)?)
@@ -210,10 +242,19 @@ pub enum Role {
     Owner,
 }
 
-/// Besitzer, Mitglied (Kurs ist geteilt) oder kein Zugriff.
+/// SQL: Nutzer `p` (Parameter wie „?2“) darf Kurs `c` sehen: eigener Kurs, für alle geteilt oder ausgewählt.
+fn can_see(p: &str) -> String {
+    format!("(c.owner_id = {p} OR c.shared = 1 OR EXISTS(SELECT 1 FROM course_members m WHERE m.course_id = c.id AND m.user_id = {p}))")
+}
+
+/// Besitzer, Mitglied (für alle geteilt oder ausgewählt) oder kein Zugriff. Gleiche Regel wie [`can_see`].
 pub fn role(conn: &Connection, who: &Who, course_id: i64) -> R<Role> {
     let row: Option<(i64, bool)> = conn
-        .query_row("SELECT owner_id, shared FROM courses WHERE id = ?1", [course_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row(
+            "SELECT owner_id, shared OR EXISTS(SELECT 1 FROM course_members m WHERE m.course_id = c.id AND m.user_id = ?2) FROM courses c WHERE id = ?1",
+            params![course_id, who.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()
         .map_err(err)?;
     match row {
@@ -239,6 +280,42 @@ fn question_role(conn: &Connection, who: &Who, question_id: i64) -> R<Role> {
         .map_err(err)?
         .ok_or(DENIED)?;
     role(conn, who, course)
+}
+
+/// Besitzer immer; Mitglieder nur, wenn der Besitzer es erlaubt und der Kurs nicht ohnehin für alle ist.
+fn may_invite(conn: &Connection, who: &Who, course_id: i64) -> R<()> {
+    if role(conn, who, course_id)? == Role::Owner {
+        return Ok(());
+    }
+    let allowed: bool = conn.query_row("SELECT members_invite AND NOT shared FROM courses WHERE id = ?1", [course_id], |r| r.get(0)).map_err(err)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(DENIED.into())
+    }
+}
+
+/// Nur aktive Konten mit Passwort, nie der Besitzer; unbekannte IDs fallen still weg.
+fn add_members(conn: &Connection, course_id: i64, ids: &[i64]) -> R<()> {
+    for id in ids.iter().take(1000) {
+        conn.execute(
+            "INSERT OR IGNORE INTO course_members(course_id, user_id)
+             SELECT c.id, u.id FROM users u JOIN courses c ON c.id = ?1
+             WHERE u.id = ?2 AND u.pw_hash IS NOT NULL AND u.disabled = 0 AND u.id != c.owner_id",
+            params![course_id, id],
+        )
+        .map_err(err)?;
+    }
+    Ok(())
+}
+
+fn doc_owner(conn: &Connection, who: &Who, document_id: i64) -> R<()> {
+    let course: i64 = conn
+        .query_row("SELECT course_id FROM documents WHERE id = ?1", [document_id], |r| r.get(0))
+        .optional()
+        .map_err(err)?
+        .ok_or(DENIED)?;
+    owner(role(conn, who, course)?)
 }
 
 fn owner(r: Role) -> R<()> {
@@ -284,26 +361,47 @@ struct Course {
     documents: Vec<DocOut>,
     /// Eigener Kurs (darf bearbeiten, löschen, PDFs hinzufügen)
     mine: bool,
+    /// Außer dem Besitzer sieht ihn noch jemand (alle oder ausgewählte Personen)
     shared: bool,
+    share_all: bool,
+    /// Anzahl ausgewählter Personen
+    members: i64,
+    members_invite: bool,
+    /// Darf Personen hinzufügen (Besitzer, oder Mitglied mit Erlaubnis)
+    can_invite: bool,
     owner: String,
+    /// Meine zuletzt falsch beantworteten Fragen in diesem Kurs
+    wrong: i64,
+}
+
+#[derive(Serialize)]
+struct Person {
+    id: i64,
+    name: String,
+    member: bool,
 }
 
 fn courses(c: &Core, who: &Who) -> R<Vec<Course>> {
     let conn = c.db.lock().unwrap();
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT c.id, c.name, c.exam_date,
                (SELECT COUNT(*) FROM units u WHERE u.course_id = c.id),
                (SELECT COUNT(*) FROM units u WHERE u.course_id = c.id AND u.status = 'ready'),
                (SELECT json_group_array(json_object('id', d.id, 'name', d.name)) FROM (SELECT id, name FROM documents WHERE course_id = c.id ORDER BY id) d),
-               c.owner_id = ?1, c.shared, COALESCE(o.name, '')
+               c.owner_id = ?1, c.shared, COALESCE(o.name, ''),
+               (SELECT COUNT(*) FROM course_members m WHERE m.course_id = c.id), c.members_invite,
+               (SELECT COUNT(*) FROM progress p JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id
+                 WHERE u.course_id = c.id AND p.user_id = ?1 AND p.wrong = 1 AND p.hidden = 0)
              FROM courses c LEFT JOIN users o ON o.id = c.owner_id
-             WHERE c.owner_id = ?1 OR c.shared = 1 ORDER BY c.created_at",
-        )
+             WHERE {} ORDER BY c.created_at",
+            can_see("?1")
+        ))
         .map_err(err)?;
     let rows = stmt
         .query_map([who.id], |r| {
             let docs: String = r.get(5)?;
+            let (mine, share_all, members, members_invite): (bool, bool, i64, bool) = (r.get(6)?, r.get(7)?, r.get(9)?, r.get(10)?);
             Ok(Course {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -311,9 +409,14 @@ fn courses(c: &Core, who: &Who) -> R<Vec<Course>> {
                 units: r.get(3)?,
                 ready: r.get(4)?,
                 documents: serde_json::from_str(&docs).unwrap_or_default(),
-                mine: r.get(6)?,
-                shared: r.get(7)?,
+                mine,
+                shared: share_all || members > 0,
+                share_all,
+                members,
+                members_invite,
+                can_invite: mine || (members_invite && !share_all),
                 owner: r.get(8)?,
+                wrong: r.get(11)?,
             })
         })
         .map_err(err)?;
@@ -338,21 +441,34 @@ fn create_course(c: &Core, who: &Who, name: &str, exam_date: Option<String>) -> 
     Ok(conn.last_insert_rowid())
 }
 
-fn update_course(c: &Core, who: &Who, id: i64, name: &str, exam_date: Option<String>, shared: Option<bool>) -> R<()> {
-    let conn = c.db.lock().unwrap();
+/// `share`: „none“ = nur ich, „some“ = ausgewählte Personen (`members` ersetzt die Auswahl), „all“ = alle auf dem Server.
+/// Bei „all“ bleibt die Auswahl gespeichert, falls man zurückwechselt.
+fn update_course(c: &Core, who: &Who, id: i64, name: &str, exam_date: Option<String>, share: Option<&str>, members: Option<Vec<i64>>, members_invite: Option<bool>) -> R<()> {
+    let mut conn = c.db.lock().unwrap();
     owner(role(&conn, who, id)?)?;
-    conn.execute(
-        "UPDATE courses SET name = ?1, exam_date = ?2, shared = COALESCE(?3, shared) WHERE id = ?4",
-        params![course_name(name)?, exam_date.filter(|d| !d.is_empty()), shared, id],
+    let all = match share {
+        None => None,
+        Some("all") => Some(true),
+        Some("some" | "none") => Some(false),
+        Some(_) => return Err("Unbekannte Freigabe".into()),
+    };
+    let tx = conn.transaction().map_err(err)?;
+    tx.execute(
+        "UPDATE courses SET name = ?1, exam_date = ?2, shared = COALESCE(?3, shared), members_invite = COALESCE(?4, members_invite) WHERE id = ?5",
+        params![course_name(name)?, exam_date.filter(|d| !d.is_empty()), all, members_invite, id],
     )
-    .map(|_| ())
-    .map_err(err)
-}
-
-#[derive(Serialize)]
-struct Imported {
-    units: usize,
-    figures: usize,
+    .map_err(err)?;
+    match (share, members) {
+        (Some("none"), _) => {
+            tx.execute("DELETE FROM course_members WHERE course_id = ?1", [id]).map_err(err)?;
+        }
+        (Some("some"), Some(m)) => {
+            tx.execute("DELETE FROM course_members WHERE course_id = ?1", [id]).map_err(err)?;
+            add_members(&tx, id, &m)?;
+        }
+        _ => {}
+    }
+    tx.commit().map_err(err)
 }
 
 #[derive(Serialize)]
@@ -557,6 +673,8 @@ struct Exercise {
     spots: Vec<[f64; 4]>,
     /// data:-URL der Grafik (label)
     image: Option<String>,
+    /// Gelernte Frage aus einer anderen Einheit, eingestreut zum Auffrischen
+    refresh: bool,
 }
 
 /// Zeile aus der Datenbank → Aufgabe. Strukturaufgaben werden hier umgebaut, damit die Lösung im Kern bleibt.
@@ -608,12 +726,15 @@ struct LessonOut {
 
 const LESSON_SIZE: usize = 8;
 
-fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>) -> R<LessonOut> {
+/// Lektion einer Einheit, „Falsche wiederholen“ eines Kurses (`wrong_course`) oder die tägliche Wiederholung (beides None).
+fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>, wrong_course: Option<i64>) -> R<LessonOut> {
     let conn = c.db.lock().unwrap();
     let now = db::now();
     let mut rng = learn::Shuffler::new();
+    const SELECT: &str = "SELECT q.id, q.kind, q.prompt, q.options, q.groups, q.spots, f.image FROM";
 
     let mut picked: Vec<Picked>;
+    let mut refresh: Vec<i64> = vec![];
     if let Some(id) = unit_id {
         let (course_id, _) = unit_role(&conn, who, id)?;
         // Hat die Einheit nur Grafik- oder eigene Aufgaben, schreibt die KI trotzdem ihre Fragen.
@@ -655,14 +776,39 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>) -> R<LessonOut> {
             let _ = conn.execute("UPDATE units SET q_state = 1 WHERE id = ?1", [id]);
             c.wake();
         }
+        // Auffrischen: bis zu 2 schon gelernte Fragen aus anderen Einheiten des Kurses, fällige zuerst, sonst zufällig.
+        let mut old = query_questions(
+            &conn,
+            &format!(
+                "{SELECT} progress p JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id LEFT JOIN figures f ON f.id = q.figure_id
+                 WHERE p.user_id = ?3 AND p.hidden = 0 AND p.box >= 2 AND u.course_id = ?1 AND q.unit_id != ?2
+                 ORDER BY p.due_at <= ?4 DESC, RANDOM() LIMIT 2"
+            ),
+            params![course_id, id, who.id, now],
+        )?;
+        refresh = old.iter().map(|p| p.id).collect();
+        picked.append(&mut old);
+    } else if let Some(course) = wrong_course {
+        role(&conn, who, course)?;
+        picked = query_questions(
+            &conn,
+            &format!(
+                "{SELECT} progress p JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id LEFT JOIN figures f ON f.id = q.figure_id
+                 WHERE p.user_id = ?2 AND p.hidden = 0 AND p.wrong = 1 AND u.course_id = ?1 ORDER BY p.due_at LIMIT ?3"
+            ),
+            params![course, who.id, 12],
+        )?;
     } else {
         picked = query_questions(
             &conn,
-            "SELECT q.id, q.kind, q.prompt, q.options, q.groups, q.spots, f.image FROM progress p
-             JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id JOIN courses c ON c.id = u.course_id
-             LEFT JOIN figures f ON f.id = q.figure_id
-             WHERE p.user_id = ?3 AND p.hidden = 0 AND p.box > 0 AND p.due_at <= ?1 AND (c.owner_id = ?3 OR c.shared = 1)
-             ORDER BY p.due_at LIMIT ?2",
+            &format!(
+                "{SELECT} progress p
+                 JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id JOIN courses c ON c.id = u.course_id
+                 LEFT JOIN figures f ON f.id = q.figure_id
+                 WHERE p.user_id = ?3 AND p.hidden = 0 AND p.box > 0 AND p.due_at <= ?1 AND {}
+                 ORDER BY p.due_at LIMIT ?2",
+                can_see("?3")
+            ),
             params![now, 10, who.id],
         )?;
     }
@@ -670,11 +816,14 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>) -> R<LessonOut> {
     rng.shuffle(&mut picked);
     let ids: Vec<String> = picked.iter().map(|p| p.id.to_string()).collect();
     let mut exercises: Vec<Exercise> = picked.into_iter().map(|p| to_exercise(p, &mut rng)).collect();
+    for e in &mut exercises {
+        e.refresh = e.id.is_some_and(|id| refresh.contains(&id));
+    }
 
-    // Zuordnen-Runde aus den Begriffen – ganz ohne KI.
+    // Zuordnen-Runde aus den Begriffen – ganz ohne KI. Nicht bei „Falsche wiederholen“: dort zählen nur die Fragen.
     let term_sql = match unit_id {
         Some(_) => "SELECT term, definition FROM terms WHERE unit_id = ?1".to_string(),
-        None if !ids.is_empty() => format!(
+        None if wrong_course.is_none() && !ids.is_empty() => format!(
             "SELECT term, definition FROM terms WHERE unit_id IN (SELECT unit_id FROM questions WHERE id IN ({}))",
             ids.join(",")
         ),
@@ -763,9 +912,9 @@ fn answer(c: &Core, who: &Who, question_id: i64, given: &str, retry: bool) -> R<
     if !retry {
         let b = learn::next_box(boxed, correct);
         conn.execute(
-            "INSERT INTO progress(user_id, question_id, box, due_at) VALUES(?1, ?2, ?3, ?4)
-             ON CONFLICT(user_id, question_id) DO UPDATE SET box = excluded.box, due_at = excluded.due_at",
-            params![who.id, question_id, b, learn::due_at(b, db::now())],
+            "INSERT INTO progress(user_id, question_id, box, due_at, wrong) VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(user_id, question_id) DO UPDATE SET box = excluded.box, due_at = excluded.due_at, wrong = excluded.wrong",
+            params![who.id, question_id, b, learn::due_at(b, db::now()), !correct],
         )
         .map_err(err)?;
     }
@@ -822,8 +971,11 @@ fn stats_of(conn: &Connection, who: &Who) -> R<Stats> {
         .map_err(err)?;
     let due: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM progress p JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id JOIN courses c ON c.id = u.course_id
-             WHERE p.user_id = ?2 AND p.hidden = 0 AND p.box > 0 AND p.due_at <= ?1 AND (c.owner_id = ?2 OR c.shared = 1)",
+            &format!(
+                "SELECT COUNT(*) FROM progress p JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id JOIN courses c ON c.id = u.course_id
+                 WHERE p.user_id = ?2 AND p.hidden = 0 AND p.box > 0 AND p.due_at <= ?1 AND {}",
+                can_see("?2")
+            ),
             params![db::now(), who.id],
             |r| r.get(0),
         )
@@ -885,7 +1037,8 @@ struct QuestionOut {
 
 fn questions_where(conn: &Connection, who: &Who, where_sql: &str, id: i64) -> R<Vec<QuestionOut>> {
     let sql = format!(
-        "SELECT q.id, q.unit_id, q.kind, q.prompt, q.options, q.answer, q.why, COALESCE(p.hidden, 0), c.owner_id = ?2, c.shared,
+        "SELECT q.id, q.unit_id, q.kind, q.prompt, q.options, q.answer, q.why, COALESCE(p.hidden, 0), c.owner_id = ?2,
+           c.shared OR EXISTS(SELECT 1 FROM course_members m WHERE m.course_id = c.id),
            q.groups, q.spots, q.figure_id
          FROM questions q JOIN units u ON u.id = q.unit_id JOIN courses c ON c.id = u.course_id
          LEFT JOIN progress p ON p.question_id = q.id AND p.user_id = ?2
@@ -1048,7 +1201,7 @@ mod tests {
     fn seed(c: &Core) -> (i64, i64, i64, i64) {
         let conn = c.db.lock().unwrap();
         conn.execute_batch(
-            "INSERT INTO users(id, name, created_at) VALUES(2, 'Kommilitone', 0);
+            "INSERT INTO users(id, name, pw_hash, created_at) VALUES(2, 'Kommilitone', 'x', 0), (3, 'Fremde', 'x', 0);
              INSERT INTO courses(id, name, created_at, owner_id) VALUES(10, 'Mikro', 0, 1);
              INSERT INTO documents(id, course_id, name, pages, created_at) VALUES(20, 10, 'vl.pdf', 3, 0);
              INSERT INTO units(id, course_id, document_id, idx, page_from, page_to, title, source_text, status, q_state)
@@ -1062,6 +1215,7 @@ mod tests {
     }
 
     const U2: Who = Who { id: 2, admin: false };
+    const U3: Who = Who { id: 3, admin: false };
 
     #[test]
     fn migrates_v0_progress() {
@@ -1095,6 +1249,7 @@ mod tests {
     }
 
     const PNG: &str = "data:image/png;base64,iVBORw0KGgo=";
+    const PNG2: &str = "data:image/png;base64,iVBORw0KGgoA";
 
     #[test]
     fn foreign_course_is_denied() {
@@ -1115,7 +1270,12 @@ mod tests {
             ("figure", serde_json::json!({ "figureId": 50 })),
             ("figure", serde_json::json!({ "figureId": 99999 })),
             ("unit_figures", serde_json::json!({ "unitId": unit })),
-            ("import_figures", serde_json::json!({ "documentId": 20, "figures": [] })),
+            ("replace_document", serde_json::json!({ "documentId": 20, "name": "neu.pdf", "pages": ["Text"] })),
+            ("delete_document", serde_json::json!({ "documentId": 20 })),
+            ("delete_document", serde_json::json!({ "documentId": 99999 })),
+            ("start_lesson", serde_json::json!({ "wrongCourse": course })),
+            ("share_people", serde_json::json!({ "courseId": course })),
+            ("invite_to_course", serde_json::json!({ "courseId": course, "userIds": [2] })),
         ] {
             assert_eq!(run(&c, &U2, cmd, v).unwrap_err(), DENIED, "{cmd}");
         }
@@ -1128,7 +1288,7 @@ mod tests {
         let dir = tmp("shared");
         let c = core(&dir);
         let (course, unit, q, _) = seed(&c);
-        run(&c, &crate::LOCAL, "update_course", serde_json::json!({ "id": course, "name": "Mikro", "examDate": null, "shared": true })).unwrap();
+        run(&c, &crate::LOCAL, "update_course", serde_json::json!({ "id": course, "name": "Mikro", "examDate": null, "share": "all" })).unwrap();
 
         // Mitglied ändert die Frage → gilt für den Besitzer mit
         run(&c, &U2, "update_question", serde_json::json!({ "questionId": q, "prompt": "Die Nachfragekurve fällt normalerweise.", "options": [], "answer": "richtig", "why": "Gesetz der Nachfrage" })).unwrap();
@@ -1160,7 +1320,7 @@ mod tests {
         let dir = tmp("structured");
         let c = core(&dir);
         let (course, unit, _, _) = seed(&c);
-        run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "examDate": null, "shared": true })).unwrap();
+        run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "examDate": null, "share": "all" })).unwrap();
 
         // Ein Mitglied legt Aufgaben an (gilt für alle im Kurs)
         let mk = |v: Value| run(&c, &U2, "create_question", v).unwrap()["id"].as_i64().unwrap();
@@ -1219,11 +1379,13 @@ mod tests {
         let spot = |x: f64, label: &str| json!({ "x": x, "y": 0.2, "w": 0.15, "h": 0.08, "label": label });
         let figures = json!([
             { "page": 5, "title": "Aufbau eines Blattes", "image": PNG, "spots": [spot(0.1, "Blattader"), spot(0.4, "Blattstiel"), spot(0.7, "Blattrand")] },
-            { "page": 2, "image": PNG, "spots": [] },
+            { "page": 6, "title": "Aufbau eines Blattes", "image": PNG2, "spots": [spot(0.1, "Blattader"), spot(0.4, "Blattstiel")] }, // Animationsschritt davor
+            { "page": 2, "image": "data:image/png;base64,iVBORw0KGgoB", "spots": [] },
             { "page": 9, "image": "data:text/html;base64,PGI+", "spots": [] }
         ]);
-        let r = run(&c, &crate::LOCAL, "import_figures", json!({ "documentId": 20, "figures": figures })).unwrap();
-        assert_eq!(r["figures"], 2);
+        let figures: Vec<import::FigureIn> = serde_json::from_value(figures).unwrap();
+        let stored = import::store_figures(&c.db.lock().unwrap(), 20, &figures, &Default::default()).unwrap();
+        assert_eq!(stored, 2);
         let figs = |u: i64| run(&c, &crate::LOCAL, "unit_figures", json!({ "unitId": u })).unwrap().as_array().unwrap().len();
         assert_eq!((figs(unit), figs(31)), (1, 1));
         let qs = run(&c, &crate::LOCAL, "unit_questions", json!({ "unitId": 31 })).unwrap();
@@ -1248,5 +1410,127 @@ mod tests {
         assert_eq!(l["ready"], false);
         let q_state: i64 = c.db.lock().unwrap().query_row("SELECT q_state FROM units WHERE id = ?1", [unit], |r| r.get(0)).unwrap();
         assert_eq!(q_state, 1);
+    }
+
+
+    #[test]
+    fn replace_and_delete_document() {
+        use serde_json::json;
+        let dir = tmp("replace");
+        let c = core(&dir);
+        let (course, _, _, _) = seed(&c);
+        let pages = |v: &[String]| json!({ "documentId": 20, "name": "vl.pdf", "pages": v });
+        // Ausgangslage: ein PDF mit drei Abschnitten (je eine Seite ~3600 Zeichen, eigener Wortschatz), Fragen in den ersten beiden
+        let long = |t: &str| format!("{} ", (0..15).map(|i| format!("{t}wort{i}")).collect::<Vec<_>>().join(" ")).repeat(20);
+        let (a, b, d) = (long("Alpha"), long("Beta"), long("Delta"));
+        run(&c, &crate::LOCAL, "replace_document", pages(&[a.clone(), b.clone(), d.clone()])).unwrap();
+        let units = |c: &Core| -> Vec<(i64, i64, String, i64)> {
+            let conn = c.db.lock().unwrap();
+            let mut st = conn.prepare("SELECT id, idx, status, q_state FROM units WHERE document_id = 20 ORDER BY idx").unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap().map(Result::unwrap).collect()
+        };
+        let u = units(&c);
+        assert_eq!(u.len(), 3);
+        {
+            let conn = c.db.lock().unwrap();
+            conn.execute_batch(&format!(
+                "UPDATE units SET status = 'ready', q_state = 2, explanation = 'alt' WHERE document_id = 20;
+                 INSERT INTO questions(id, unit_id, kind, prompt, options, answer) VALUES
+                   (60, {0}, 'mc', 'Was ist Alpha genau?', '[\"a\",\"b\",\"c\",\"d\"]', 'a'),
+                   (61, {1}, 'mc', 'Was ist Beta genau?', '[\"a\",\"b\",\"c\",\"d\"]', 'a');
+                 INSERT INTO progress(user_id, question_id, box, due_at) VALUES(1, 60, 3, 0), (1, 61, 2, 0);
+                 INSERT INTO lessons(unit_id, xp, correct, total, finished_at, user_id) VALUES({0}, 10, 2, 3, 0, 1);",
+                u[0].0, u[1].0
+            ))
+            .unwrap();
+        }
+
+        // Gleiche Datei noch einmal: nichts ändert sich
+        let r = run(&c, &crate::LOCAL, "replace_document", pages(&[a.clone(), b.clone(), d.clone()])).unwrap();
+        assert_eq!((r["same"].as_i64(), r["changed"].as_i64(), r["units"].as_i64(), r["removed"].as_i64()), (Some(3), Some(0), Some(0), Some(0)));
+
+        // Beta leicht geändert, Delta weg, Gamma neu
+        let b2 = format!("{b} Zusatz Höchstpreis");
+        let r = run(&c, &crate::LOCAL, "replace_document", pages(&[a.clone(), b2, long("Gamma")])).unwrap();
+        assert_eq!((r["same"].as_i64(), r["changed"].as_i64(), r["units"].as_i64(), r["removed"].as_i64()), (Some(1), Some(1), Some(1), Some(1)));
+        let after = units(&c);
+        assert_eq!(after[0], (u[0].0, u[0].1, "ready".to_string(), 2)); // Alpha: unverändert
+        assert_eq!((after[1].0, after[1].2.as_str(), after[1].3), (u[1].0, "pending", 4)); // Beta: neu analysieren, Fragen prüfen
+        let third: String = c.db.lock().unwrap().query_row("SELECT source_text FROM units WHERE id = ?1", [after[2].0], |r| r.get(0)).unwrap();
+        assert!(third.starts_with("Gammawort") && after[2].2 == "pending"); // Gamma neu statt Delta
+        let (box60, expl): (i64, Option<String>) = c.db.lock().unwrap()
+            .query_row("SELECT p.box, u.explanation FROM progress p JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id WHERE q.id = 60", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((box60, expl.as_deref()), (3, Some("alt")));
+        let expl_b: Option<String> = c.db.lock().unwrap().query_row("SELECT explanation FROM units WHERE id = ?1", [u[1].0], |r| r.get(0)).unwrap();
+        assert!(expl_b.is_none());
+        assert!(run(&c, &crate::LOCAL, "replace_document", pages(&["  ".into()])).is_err()); // ohne Text bleibt alles
+
+        // Löschen: Einheiten, Fragen, Fortschritt weg; XP-Historie bleibt ohne Einheit
+        run(&c, &crate::LOCAL, "delete_document", json!({ "documentId": 20 })).unwrap();
+        let conn = c.db.lock().unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM units WHERE course_id = 10"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM questions"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM progress"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM lessons WHERE unit_id IS NULL"), 1);
+        let _ = course;
+    }
+
+    #[test]
+    fn wrong_questions_round() {
+        use serde_json::json;
+        let dir = tmp("wrong");
+        let c = core(&dir);
+        let (course, _, q, _) = seed(&c);
+        let wrong = || run(&c, &crate::LOCAL, "courses", Value::Null).unwrap()[0]["wrong"].as_i64().unwrap();
+        let round = || -> Vec<i64> {
+            let l = run(&c, &crate::LOCAL, "start_lesson", json!({ "wrongCourse": course })).unwrap();
+            l["exercises"].as_array().unwrap().iter().filter_map(|e| e["id"].as_i64()).collect()
+        };
+        let answer = |given: &str, retry: bool| run(&c, &crate::LOCAL, "answer", json!({ "questionId": q, "given": given, "retry": retry })).unwrap();
+        assert_eq!(wrong(), 0);
+        answer("Falsch", false);
+        answer("Richtig", true); // Wiederholung in derselben Lektion zählt nicht
+        assert_eq!((wrong(), round()), (1, vec![q]));
+        answer("Richtig", false);
+        assert_eq!((wrong(), round()), (0, vec![]));
+        let (b, due): (i64, i64) = c.db.lock().unwrap().query_row("SELECT box, due_at FROM progress WHERE question_id = ?1", [q], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(b, 2);
+        assert!(due - db::now() > 2 * 86_400); // erst in ein paar Tagen wieder fällig
+    }
+
+    #[test]
+    fn share_with_selected() {
+        use serde_json::json;
+        let dir = tmp("members");
+        let c = core(&dir);
+        let (course, unit, q, _) = seed(&c);
+        let share = |v: Value| run(&c, &crate::LOCAL, "update_course", v).unwrap();
+        let sees = |who: &Who| run(&c, who, "courses", Value::Null).unwrap().as_array().unwrap().len() == 1;
+        share(json!({ "id": course, "name": "Mikro", "share": "some", "members": [2, 1, 99] })); // Besitzer und Unbekannte fallen weg
+
+        let list = run(&c, &crate::LOCAL, "courses", Value::Null).unwrap();
+        assert_eq!((list[0]["shared"].clone(), list[0]["share_all"].clone(), list[0]["members"].clone()), (json!(true), json!(false), json!(1)));
+        assert!(sees(&U2) && !sees(&U3));
+        assert!(run(&c, &U2, "start_lesson", json!({ "unitId": unit })).is_ok());
+        run(&c, &U2, "update_question", json!({ "questionId": q, "prompt": "Die Nachfragekurve fällt meistens.", "answer": "Richtig" })).unwrap();
+        assert_eq!(run(&c, &U3, "course_path", json!({ "courseId": course })).unwrap_err(), DENIED);
+        assert_eq!(run(&c, &U3, "search_terms", json!({ "query": "" })).unwrap(), json!([]));
+
+        // Weiterteilen nur mit Erlaubnis des Besitzers, und dann nur hinzufügen
+        assert_eq!(run(&c, &U2, "share_people", json!({ "courseId": course })).unwrap_err(), DENIED);
+        assert_eq!(run(&c, &U2, "invite_to_course", json!({ "courseId": course, "userIds": [3] })).unwrap_err(), DENIED);
+        share(json!({ "id": course, "name": "Mikro", "membersInvite": true }));
+        let people = run(&c, &U2, "share_people", json!({ "courseId": course })).unwrap();
+        assert_eq!(people, json!([{ "id": 3, "name": "Fremde", "member": false }])); // weder ich noch der Besitzer
+        run(&c, &U2, "invite_to_course", json!({ "courseId": course, "userIds": [3] })).unwrap();
+        assert!(sees(&U3));
+        assert_eq!(run(&c, &U2, "update_course", json!({ "id": course, "name": "Mikro", "share": "none" })).unwrap_err(), DENIED);
+
+        // Nur ich: alle sind raus
+        share(json!({ "id": course, "name": "Mikro", "share": "none" }));
+        assert!(!sees(&U2) && !sees(&U3));
+        assert!(run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "share": "egal" })).is_err());
     }
 }

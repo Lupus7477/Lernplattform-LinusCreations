@@ -1,6 +1,6 @@
 // Lernkarte einer Einheit: Zusammenfassung, Begriffe, Fragen, ausführliche Erklärung, „Frag die KI“.
 import { call, stream } from "./api.js";
-import { docName, h, icon, markdown, openSheet, segmented, toast } from "./ui.js";
+import { docName, h, icon, markdown, openSheet, segmented, toast, zoomable } from "./ui.js";
 import { state } from "./state.js";
 
 export async function render(id) {
@@ -352,7 +352,8 @@ function figureEditor(q, sameKind) {
   let spots = sameKind ? q.spots.map((x) => ({ ...x })) : [];
   const img = h("img", { alt: "Bild für die Aufgabe", draggable: "false" });
   const stage = h("div.figure.edit", img);
-  const wrap = h("div.figure-wrap", { hidden: true }, stage);
+  const zoom = zoomable(stage, img, { maxH: 0.5 });
+  zoom.el.hidden = true;
   const list = h("div.stack");
   const gallery = h("div.gallery");
   const file = h("input", { type: "file", accept: "image/*", hidden: true });
@@ -361,7 +362,7 @@ function figureEditor(q, sameKind) {
 
   function show(src) {
     img.src = src;
-    wrap.hidden = false;
+    zoom.el.hidden = false;
     draw();
   }
   function setFigure(id, src) {
@@ -481,7 +482,7 @@ function figureEditor(q, sameKind) {
     gallery.replaceChildren(h("div.skeleton", { style: { height: "72px" } }));
     try {
       const figs = await call("unit_figures", { unitId: q.unit_id });
-      if (!figs.length) return gallery.replaceChildren(h("p.muted", "In diesem Abschnitt wurden keine Grafiken gefunden. Nimm ein eigenes Bild oder lies die Grafiken unter „Skript“ → Kurs bearbeiten nach."));
+      if (!figs.length) return gallery.replaceChildren(h("p.muted", "In diesem Abschnitt wurden keine Grafiken gefunden. Nimm ein eigenes Bild, oder ersetze das PDF unter „Hinzufügen“, damit die Grafiken neu eingelesen werden."));
       gallery.replaceChildren(
         ...figs.map((f) =>
           h("button", { type: "button", "data-id": String(f.id), "aria-pressed": String(f.id === figureId), "aria-label": f.page ? `Grafik von Seite ${f.page}` : "Eigenes Bild", onclick: () => setFigure(f.id, f.image) }, h("img", { src: f.image, alt: "" })),
@@ -499,8 +500,8 @@ function figureEditor(q, sameKind) {
     el: h(
       "div.stack",
       h("div.field", h("label", "Bild"), source, file, gallery),
-      wrap,
-      h("p.hint", "Tippe ins Bild, um eine Stelle zu setzen. Ziehen verschiebt sie, der Punkt unten rechts ändert die Größe."),
+      zoom.el,
+      h("p.hint", "Tippe ins Bild, um eine Stelle zu setzen. Ziehen verschiebt sie, der Punkt unten rechts ändert die Größe. Zum Vergrößern zwei Finger oder die Lupe."),
       list,
       h("div.field", h("label", { for: "q-spare" }, "Falsche Begriffe zur Auswahl (optional)"), spare),
     ),

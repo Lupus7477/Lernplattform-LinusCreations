@@ -129,10 +129,12 @@ function parse() {
 async function route() {
   const { name, arg } = parse();
   if (name === "lesson") {
-    const base = arg === "review" ? "review" : "learn";
+    // #/lesson/<Einheit>, #/lesson/review (fällige) oder #/lesson/wrong-<Kurs> (falsche eines Kurses)
+    const wrongCourse = arg?.startsWith("wrong-") ? Number(arg.slice(6)) : null;
+    const base = arg === "review" || wrongCourse ? "review" : "learn";
     if (mounted.name !== base) await show(base);
     lesson?.close();
-    lesson = openLesson(arg === "review" ? null : Number(arg), () => {
+    lesson = openLesson({ unitId: base === "review" ? null : Number(arg), wrongCourse }, () => {
       lesson = null;
       location.replace(`#/${base}`);
     });

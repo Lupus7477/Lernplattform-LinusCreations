@@ -144,7 +144,11 @@ const sessions = [
 const members = [
   { id: 1, name: "Alex", admin: true, disabled: false, me: true },
   { id: 2, name: "Sam", admin: false, disabled: false, me: false },
+  { id: 3, name: "Jo", admin: false, disabled: false, me: false },
+  { id: 4, name: "Mira", admin: false, disabled: false, me: false },
+  { id: 5, name: "Kemal", admin: false, disabled: false, me: false },
 ];
+const courseMembers = new Map(); // Kurs → Set der ausgewählten Personen
 
 function streak() {
   const days = [...new Set(db.lessons.map((l) => Math.floor((l.at - new Date().getTimezoneOffset() * 60) / DAY)))].sort((a, b) => b - a);
@@ -262,17 +266,36 @@ const handlers = {
   courses: () =>
     db.courses.map((c) => {
       const us = db.units.filter((u) => u.course_id === c.id);
-      return { ...c, mine: true, owner: user?.name || "Ich", units: us.length, ready: us.filter((u) => u.status === "ready").length, documents: db.documents.filter((d) => d.course_id === c.id).map((d) => ({ id: d.id, name: d.name })) };
+      const picked = courseMembers.get(c.id)?.size ?? 0;
+      const wrong = visible().filter((x) => x.wrong && us.some((u) => u.id === x.unit_id)).length;
+      return {
+        ...c,
+        mine: true,
+        owner: user?.name || "Ich",
+        shared: !!c.shared || picked > 0,
+        share_all: !!c.shared,
+        members: picked,
+        members_invite: !!c.members_invite,
+        can_invite: true,
+        wrong,
+        units: us.length,
+        ready: us.filter((u) => u.status === "ready").length,
+        documents: db.documents.filter((d) => d.course_id === c.id).map((d) => ({ id: d.id, name: d.name })),
+      };
     }),
   create_course: ({ name, examDate }) => {
     const id = db.nextId++;
     db.courses.push({ id, name, exam_date: examDate, created_at: now(), owner_id: 1, shared: false });
     return id;
   },
-  update_course: ({ id, name, examDate, shared }) => {
+  update_course: ({ id, name, examDate, share, members: picked, membersInvite }) => {
     const c = db.courses.find((x) => x.id === id);
-    Object.assign(c, { name, exam_date: examDate }, shared == null ? {} : { shared });
+    Object.assign(c, { name, exam_date: examDate }, share ? { shared: share === "all" } : {}, membersInvite == null ? {} : { members_invite: membersInvite });
+    if (share === "none") courseMembers.delete(id);
+    if (share === "some" && picked) courseMembers.set(id, new Set(picked));
   },
+  share_people: ({ courseId }) => members.filter((m) => !m.me).map((m) => ({ id: m.id, name: m.name, member: !!courseMembers.get(courseId)?.has(m.id) })),
+  invite_to_course: ({ courseId, userIds }) => courseMembers.set(courseId, new Set([...(courseMembers.get(courseId) ?? []), ...userIds])),
   delete_course: ({ id }) => {
     db.courses = db.courses.filter((c) => c.id !== id);
     db.units = db.units.filter((u) => u.course_id !== id);
@@ -287,9 +310,23 @@ const handlers = {
     for (let i = 0; i < n; i++) db.units.push({ id: db.nextId++, course_id: courseId, document_id: docId, idx: idx++, page_from: i * 5 + 1, page_to: i * 5 + 5, title: `Seiten ${i * 5 + 1}-${i * 5 + 5}`, summary: "", status: "pending", q_state: 0 });
     // Im Mock werden neue Einheiten gleich „fertig“, damit man die Grafik-Aufgaben direkt ausprobieren kann.
     db.units.filter((u) => u.document_id === docId).forEach((u) => Object.assign(u, { status: "ready", title: u.title.replace("Seiten", "Abschnitt, Seiten") }));
-    return { units: n, figures: storeFigures(docId, figures) };
+    return { units: n, figures: storeFigures(docId, figures), skipped: 0 };
   },
-  import_figures: ({ documentId, figures }) => ({ units: 0, figures: storeFigures(documentId, figures) }),
+  // Im Mock einfach: alle Einheiten des PDFs neu, als „geändert“ gezählt
+  replace_document: ({ documentId, name, pages, figures = [] }) => {
+    if (!pages.some((p) => p.trim())) throw "In diesem PDF wurde kein Text gefunden. Ist es eingescannt?";
+    const d = db.documents.find((x) => x.id === documentId);
+    d.name = name;
+    db.figures = db.figures.filter((f) => db.units.find((u) => u.id === f.unit_id)?.document_id !== documentId || f.page == null);
+    const changed = db.units.filter((u) => u.document_id === documentId).length;
+    return { units: 0, same: 0, changed, removed: 0, figures: storeFigures(documentId, figures), skipped: 0 };
+  },
+  delete_document: ({ documentId }) => {
+    const gone = new Set(db.units.filter((u) => u.document_id === documentId).map((u) => u.id));
+    db.questions = db.questions.filter((x) => !gone.has(x.unit_id));
+    db.units = db.units.filter((u) => !gone.has(u.id));
+    db.documents = db.documents.filter((d) => d.id !== documentId);
+  },
   figure: ({ figureId }) => db.figures.find((f) => f.id === figureId) ?? null,
   unit_figures: ({ unitId }) => db.figures.filter((f) => f.unit_id === unitId),
   course_path: ({ courseId }) =>
@@ -318,8 +355,10 @@ const handlers = {
     return u.explanation;
   },
   ask: ({ onToken }) => streamText("Gute Frage! Bei einem **höheren Preis** lohnt sich der Kauf für weniger Menschen. Deshalb sinkt die nachgefragte Menge, solange alles andere gleich bleibt.", onToken),
-  start_lesson: ({ unitId }) => {
-    const pool = unitId == null ? visible().filter((x) => x.box > 0 && x.due_at <= now()) : visible().filter((x) => x.unit_id === unitId);
+  start_lesson: ({ unitId, wrongCourse }) => {
+    const inCourse = (x) => db.units.find((u) => u.id === x.unit_id)?.course_id === wrongCourse;
+    const pool = wrongCourse != null ? visible().filter((x) => x.wrong && inCourse(x)) : unitId == null ? visible().filter((x) => x.box > 0 && x.due_at <= now()) : visible().filter((x) => x.unit_id === unitId);
+    if (wrongCourse != null) return { ready: true, failed: false, exercises: shuffle(pool).slice(0, 12).map(toExercise) };
     if (!pool.length && unitId != null) return { ready: false, failed: false, exercises: [] };
     const ex = shuffle(pool).slice(0, 8).map(toExercise);
     const terms = shuffle(db.terms.filter((t) => (unitId == null ? pool.some((p) => p.unit_id === t.unit_id) : t.unit_id === unitId))).slice(0, 4);
@@ -330,6 +369,7 @@ const handlers = {
     const x = db.questions.find((y) => y.id === questionId);
     const { correct, solution = null } = ["sort", "order", "cloze", "label"].includes(x.kind) ? grade(x, given) : { correct: norm(given) === norm(x.answer) };
     if (!retry) {
+      x.wrong = !correct;
       x.box = correct ? Math.min(5, x.box + 1) : 1;
       x.due_at = now() + [0, 1, 3, 7, 14, 30][x.box] * DAY;
     }

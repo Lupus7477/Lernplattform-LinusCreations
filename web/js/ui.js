@@ -148,6 +148,101 @@ export function flip(els, mutate, ms = 240) {
   }
 }
 
+/**
+ * Bild zum Hineinzoomen: zwei Finger, Strg/⌘ + Mausrad (auch Trackpad-Pinch) oder die Knöpfe −, 100 %, +.
+ * Zoom ändert die Breite der Bühne statt `transform`: Stellen rücken auseinander, Begriffe darin bleiben gleich groß.
+ * Zoom 1 = eingepasst in die Breite und in `maxH` der Fensterhöhe. `start(grundbreite)` → Zoom nach dem Laden.
+ */
+export function zoomable(stage, img, { maxH = 0.6, start } = {}) {
+  const frame = h("div.figure-wrap", stage);
+  const minus = h("button.icon-btn", { type: "button", "aria-label": "Verkleinern" }, icon("magnifying-glass-minus"));
+  const pct = h("button.zoom-pct.num", { type: "button", "aria-label": "Bild einpassen" }, "100 %");
+  const plus = h("button.icon-btn", { type: "button", "aria-label": "Vergrößern" }, icon("magnifying-glass-plus"));
+  const el = h("div.figure-box", { style: { "--fig-max": `${maxH * 100}dvh` } }, frame, h("div.zoom-bar", minus, pct, plus));
+  let z = 1;
+  let base = 0;
+  let width = 0;
+  let anim = 0;
+
+  const fit = () => {
+    width = frame.clientWidth;
+    const ratio = img.naturalWidth / img.naturalHeight || 1;
+    base = Math.max(120, Math.min(width - 28, innerHeight * maxH * ratio)); // 28 = Innenabstand des Rahmens
+  };
+  /** Zoom setzen; der Punkt (x, y) im Fenster bleibt dabei unter Finger bzw. Mauszeiger stehen. */
+  function set(next, x, y) {
+    if (!base) fit();
+    const f = frame.getBoundingClientRect();
+    const px = x ?? f.left + f.width / 2;
+    const py = y ?? f.top + f.height / 2;
+    const old = stage.getBoundingClientRect();
+    const fx = (px - old.left) / (old.width || 1);
+    const fy = (py - old.top) / (old.height || 1);
+    z = Math.min(4, Math.max(1, next || 1));
+    frame.classList.toggle("zoomed", z > 1.01);
+    stage.style.width = `${Math.round(base * z)}px`;
+    const now = stage.getBoundingClientRect();
+    frame.scrollLeft += now.left + fx * now.width - px;
+    frame.scrollTop += now.top + fy * now.height - py;
+    pct.textContent = `${Math.round(z * 100)} %`;
+    minus.disabled = z <= 1.01;
+    plus.disabled = z >= 3.99;
+  }
+  /** Knöpfe: kurz gleiten statt springen, jede neue Geste unterbricht. */
+  function glide(target) {
+    cancelAnimationFrame(anim);
+    if (reduceMotion()) return set(target);
+    const from = z;
+    const t0 = performance.now();
+    const step = (now) => {
+      const t = Math.min(1, (now - t0) / 180);
+      set(from + (target - from) * (1 - (1 - t) ** 3));
+      if (t < 1) anim = requestAnimationFrame(step);
+    };
+    anim = requestAnimationFrame(step);
+  }
+  minus.addEventListener("click", () => glide(z / 1.5));
+  plus.addEventListener("click", () => glide(z * 1.5));
+  pct.addEventListener("click", () => glide(1));
+
+  frame.addEventListener(
+    "wheel",
+    (e) => {
+      if (!e.ctrlKey && !e.metaKey) return; // normales Rad scrollt weiter
+      e.preventDefault();
+      cancelAnimationFrame(anim);
+      set(z * Math.exp(-Math.max(-50, Math.min(50, e.deltaY)) * 0.01), e.clientX, e.clientY);
+    },
+    { passive: false },
+  );
+  // Zwei Finger zoomen, einer scrollt wie gewohnt.
+  let pinch = null;
+  const spread = ([a, b]) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  frame.addEventListener("touchstart", (e) => e.touches.length === 2 && (pinch = { d: spread(e.touches), z }), { passive: true });
+  frame.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!pinch || e.touches.length !== 2) return;
+      e.preventDefault();
+      cancelAnimationFrame(anim);
+      const [a, b] = e.touches;
+      set((pinch.z * spread(e.touches)) / pinch.d, (a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2);
+    },
+    { passive: false },
+  );
+  frame.addEventListener("touchend", (e) => e.touches.length < 2 && (pinch = null));
+
+  const load = () => {
+    base = 0;
+    fit();
+    set(start?.(base) ?? 1);
+  };
+  img.addEventListener("load", load);
+  if (img.complete && img.naturalWidth) requestAnimationFrame(load);
+  new ResizeObserver(() => frame.clientWidth && frame.clientWidth !== width && img.naturalWidth && (fit(), set(z))).observe(frame);
+  return { el, frame, set };
+}
+
 export function countUp(el, to, ms = 700) {
   if (reduceMotion() || to <= 0) {
     el.textContent = String(to);

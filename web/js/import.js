@@ -1,6 +1,6 @@
 // Hinzufügen: Kurs anlegen, PDF einlesen (pdf.js, läuft in jeder WebView), Fortschritt der Vorbereitung.
 import { call } from "./api.js";
-import { confirmSheet, fmtDate, h, icon, openSheet, toast } from "./ui.js";
+import { confirmSheet, fmtDate, h, icon, openSheet, segmented, toast } from "./ui.js";
 import { aiNotice, currentCourse, emit, loadCourses, selectCourse, state, subscribe } from "./state.js";
 
 let pdfjs;
@@ -35,7 +35,7 @@ async function readPdf(file, onPage) {
 
 // ---------- Grafiken zum Beschriften (ohne KI: die Beschriftung steht als Text im PDF) ----------
 // ponytail: Faustregeln für Folien-PDFs. Greifen sie daneben, hier nachjustieren; schlechte Aufgaben kann man ausblenden.
-const FIG = { maxFigures: 30, maxSpots: 8, maxPx: 1400, minLabels: 3, bigImage: 0.25, near: 0.04 };
+const FIG = { maxFigures: 30, maxSpots: 8, maxPx: 2000, minLabels: 3, bigImage: 0.25, near: 0.04 };
 const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
 const at = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
 const bbox = (pts) => {
@@ -111,7 +111,8 @@ function edgeColor(ctx, p) {
 
 /** Ausschnitt rendern, gewählte Beschriftungen übermalen, Stellen relativ zum Ausschnitt (0–1). */
 async function renderCrop(page, r, labels) {
-  const scale = Math.min(3, FIG.maxPx / r.w);
+  // Lange Seite bis 2000 px: kleine Grafiken bleiben beim Zoomen scharf, hohe werden nicht riesig.
+  const scale = Math.min(4, FIG.maxPx / Math.max(r.w, r.h));
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.ceil(r.w * scale));
   canvas.height = Math.max(1, Math.ceil(r.h * scale));
@@ -189,7 +190,15 @@ async function findFigure(page, content) {
   const sorted = [...labels].sort((a, b) => a.y - b.y || a.x - b.x);
   const step = Math.ceil(sorted.length / FIG.maxSpots);
   const chosen = sorted.filter((_, i) => i % step === 0).slice(0, FIG.maxSpots);
-  const r = union([...boxes.filter((b) => chosen.some((l) => near(l, b))), ...chosen]);
+  let r = union([...boxes.filter((b) => chosen.some((l) => near(l, b))), ...chosen]);
+  // Formen, die in den Ausschnitt ragen (Pfeile, Linien, Rahmen), ganz mitnehmen, sonst ist die Grafik abgeschnitten.
+  // Große Flächen (Hintergrund-Kästen) nicht: die würden den Ausschnitt auf die halbe Folie aufblähen.
+  const overlaps = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  for (let k = 0; k < 3; k++) {
+    const grown = union([r, ...boxes.filter((b) => overlaps(b, r) && b.w * b.h <= r.w * r.h * 1.5)]);
+    if (grown.w * grown.h <= r.w * r.h + 1) break;
+    r = grown;
+  }
   const m = W * 0.03;
   // Rand um die Grafik, aber nicht in den Folientitel darüber hinein
   const top = Math.max(0, r.y - m, title && title.y + title.h <= r.y ? title.y + title.h : 0);
@@ -278,7 +287,7 @@ function content(page) {
           bar.style.setProperty("--p", String(n / of));
         });
         const res = await call("import_document", { courseId, name: file.name, pages, figures });
-        line.textContent = `${res.units} ${res.units === 1 ? "Einheit wird" : "Einheiten werden"} vorbereitet${res.figures ? `, ${res.figures} ${res.figures === 1 ? "Grafik" : "Grafiken"} zum Beschriften` : ""}.`;
+        line.textContent = `${res.units} ${res.units === 1 ? "Einheit wird" : "Einheiten werden"} vorbereitet${res.figures ? `, ${res.figures} ${res.figures === 1 ? "Grafik" : "Grafiken"} zum Beschriften` : ""}.${skippedNote(res)}`;
       } catch (e) {
         line.textContent = String(e?.message || e);
         line.style.color = "var(--wrong)";
@@ -299,77 +308,198 @@ function content(page) {
   ].filter(Boolean);
 }
 
+const skippedNote = (r) => (r.skipped ? ` ${r.skipped} doppelte ${r.skipped === 1 ? "Seite" : "Seiten"} übersprungen.` : "");
+const fail = (e) => toast(String(e?.message || e));
+async function refresh() {
+  await loadCourses();
+  emit("courses");
+  emit("course-updated", null);
+}
+
 function courseCard(c) {
   const done = c.ready === c.units;
+  const badge = !c.mine ? h("span.badge", `von ${c.owner}`) : c.share_all ? h("span.badge", "Mit allen geteilt") : c.members ? h("span.badge", `Geteilt mit ${c.members}`) : null;
+  // Eigene PDFs: ersetzen (neue Fassung) oder löschen, beides mit Rückfrage
+  const doc = (d) =>
+    c.mine
+      ? h(
+          "div.doc",
+          icon("file-pdf"),
+          h("span.name", d.name),
+          h("button.icon-btn", { type: "button", title: "Ersetzen", "aria-label": `„${d.name}“ ersetzen`, onclick: () => replaceDoc(d) }, icon("upload-simple")),
+          h("button.icon-btn.del", { type: "button", title: "Löschen", "aria-label": `„${d.name}“ löschen`, onclick: () => deleteDoc(c, d) }, icon("trash")),
+        )
+      : h("span", icon("file-pdf"), d.name);
   return h(
     "div.card.course-card",
     h(
       "div.row.between",
-      h("h3", c.name, c.mine ? (c.shared ? h("span.badge", "Geteilt") : null) : h("span.badge", `von ${c.owner}`)),
-      c.mine ? h("button.btn.ghost", { type: "button", onclick: () => editCourse(c) }, icon("pencil-simple"), "Bearbeiten") : null,
+      h("h3", c.name, badge),
+      c.mine
+        ? h("button.btn.ghost", { type: "button", onclick: () => editCourse(c) }, icon("pencil-simple"), "Bearbeiten")
+        : c.can_invite
+          ? h("button.btn.ghost", { type: "button", onclick: () => inviteSheet(c) }, icon("users"), "Personen hinzufügen")
+          : null,
     ),
     c.exam_date ? h("p.muted", `Prüfung am ${fmtDate(c.exam_date)}`) : null,
-    h("div.docs", c.documents.map((d) => h("span", icon("file-pdf"), d.name))),
+    h("div.docs", c.documents.map(doc)),
     h("div.bar", h("i", { style: { "--p": String(c.units ? c.ready / c.units : 0) } })),
     h("p.muted.num", done ? `Alle ${c.units} Einheiten bereit` : `${c.ready} von ${c.units} Einheiten vorbereitet`),
   );
 }
 
-/** Grafiken eines schon eingelesenen PDFs nachladen: nur Bilder und Beschriftungen, die Einheiten bleiben. */
-function reloadFigures(d) {
+/** Neue Fassung eines PDFs: gleiche Abschnitte bleiben samt Fortschritt, bei geänderten prüft die KI die Fragen. */
+function replaceDoc(d) {
   const input = h("input", { type: "file", accept: "application/pdf,.pdf" });
   input.addEventListener("change", async () => {
     const file = input.files[0];
     if (!file) return;
-    if (file.name !== d.name && !(await confirmSheet({ title: "Andere Datei?", text: `Gewählt ist „${file.name}“, eingelesen wurde „${d.name}“. Die Grafiken werden nach Seitenzahl zugeordnet.`, confirm: "Trotzdem nachladen" }))) return;
-    toast("Grafiken werden gesucht …");
+    const ok = await confirmSheet({
+      title: "PDF ersetzen?",
+      text: `„${file.name}“ ersetzt „${d.name}“. Unveränderte Abschnitte behalten Fragen und Fortschritt. Bei geänderten prüft die KI jede Frage: Veraltete fliegen raus, neue kommen dazu.`,
+      confirm: "Ersetzen",
+    });
+    if (!ok) return;
+    toast(`„${file.name}“ wird gelesen …`);
     try {
-      const { figures } = await readPdf(file, () => {});
-      const res = await call("import_figures", { documentId: d.id, figures });
-      toast(res.figures ? `${res.figures} ${res.figures === 1 ? "Grafik" : "Grafiken"} übernommen.` : "In dieser Datei wurden keine Grafiken gefunden.");
-      emit("course-updated", null);
+      const { pages, figures } = await readPdf(file, () => {});
+      const r = await call("replace_document", { documentId: d.id, name: file.name, pages, figures });
+      const parts = [r.changed && `${r.changed} geändert`, r.units && `${r.units} neu`, r.removed && `${r.removed} entfernt`].filter(Boolean);
+      const text = parts.length
+        ? `Ersetzt: ${parts.join(", ")}.${r.changed ? " Die KI prüft die Fragen." : ""}`
+        : r.figures
+          ? `Text unverändert, ${r.figures} ${r.figures === 1 ? "Grafik" : "Grafiken"} neu eingelesen.`
+          : "Inhalt unverändert. Fragen und Fortschritt bleiben.";
+      toast(text + skippedNote(r));
+      await refresh();
     } catch (e) {
-      toast(String(e?.message || e));
+      fail(e);
     }
   });
   input.click();
 }
 
+async function deleteDoc(c, d) {
+  const ok = await confirmSheet({
+    title: `„${d.name}“ löschen?`,
+    text: `Alle Einheiten und Fragen aus diesem PDF werden gelöscht, mit deinem Fortschritt darin${c.shared ? " und dem aller, mit denen du den Kurs teilst" : ""}. Das lässt sich nicht rückgängig machen.`,
+    confirm: "Endgültig löschen",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await call("delete_document", { documentId: d.id });
+  } catch (e) {
+    return fail(e);
+  }
+  await refresh();
+  toast("PDF gelöscht.");
+}
+
+/** Personenliste mit Suche, Angehakte zuerst. `locked`: wer schon drin ist, bleibt angehakt (Mitglieder können nur hinzufügen). */
+function peoplePicker(people, { locked = false } = {}) {
+  if (!people.length) return { el: h("p.muted", "Noch niemand sonst auf dem Server."), picked: () => [] };
+  const picked = new Set(people.filter((p) => p.member).map((p) => p.id));
+  const search = h("input.input", { type: "search", autocomplete: "off", placeholder: "Name suchen", "aria-label": "Personen suchen" });
+  const count = h("span.hint", { "aria-live": "polite" });
+  const counted = () => (count.textContent = `${picked.size} ausgewählt`);
+  const rows = [...people]
+    .sort((a, b) => Number(b.member) - Number(a.member))
+    .map((p) => {
+      const box = h("input", { type: "checkbox", checked: p.member, disabled: locked && p.member });
+      box.addEventListener("change", () => (box.checked ? picked.add(p.id) : picked.delete(p.id), counted()));
+      return { name: p.name.toLowerCase(), el: h("label.person", box, h("span", p.name)) };
+    });
+  const empty = h("p.muted", { hidden: true }, "Niemand heißt so.");
+  search.addEventListener("input", () => {
+    const q = search.value.trim().toLowerCase();
+    rows.forEach((r) => (r.el.hidden = !r.name.includes(q)));
+    empty.hidden = rows.some((r) => !r.el.hidden);
+  });
+  counted();
+  return { el: h("div.stack", search, h("div.people", rows.map((r) => r.el), empty), count), picked: () => [...picked] };
+}
+
+/** Mitglied mit Einladerecht: weitere Personen hinzufügen. */
+async function inviteSheet(c) {
+  let people;
+  try {
+    people = await call("share_people", { courseId: c.id });
+  } catch (e) {
+    return fail(e);
+  }
+  const picker = peoplePicker(people, { locked: true });
+  const save = h("button.btn.block", { type: "button", disabled: !people.length }, "Hinzufügen");
+  const s = openSheet({ title: "Personen hinzufügen", body: [h("p.muted", `Sie können mit „${c.name}“ lernen und Fragen verbessern. Ihr Fortschritt bleibt ihrer.`), picker.el], foot: save });
+  save.addEventListener("click", async () => {
+    const added = picker.picked().filter((id) => !people.find((p) => p.id === id)?.member).length;
+    save.disabled = true;
+    try {
+      await call("invite_to_course", { courseId: c.id, userIds: picker.picked() });
+    } catch (e) {
+      save.disabled = false;
+      return fail(e);
+    }
+    s.close();
+    await refresh();
+    toast(added ? `${added} ${added === 1 ? "Person" : "Personen"} hinzugefügt.` : "Keine Änderung.");
+  });
+}
+
+const SHARE_HINT = {
+  none: "Nur du siehst diesen Kurs.",
+  some: "Die ausgewählten Personen können mit diesem Kurs lernen und Fragen verbessern. Dein Fortschritt bleibt deiner.",
+  all: "Alle Konten auf diesem Server können mit diesem Kurs lernen und Fragen verbessern. Dein Fortschritt bleibt deiner.",
+};
+
 function editCourse(c) {
   const name = h("input.input", { id: "edit-name", value: c.name, autocomplete: "off" });
   const date = h("input.input", { id: "edit-date", type: "date", value: c.exam_date || "" });
-  // Teilen gibt es nur auf dem eigenen Server: dort sehen alle Konten den Kurs.
+  // Teilen gibt es nur auf dem eigenen Server: nur ich, ausgewählte Personen oder alle Konten.
   const onServer = state.session?.mode === "server";
-  const share = onServer ? h("input.switch", { type: "checkbox", id: "edit-share", checked: c.shared }) : null;
+  let mode = c.share_all ? "all" : c.members ? "some" : "none";
+  let picker = null;
+  const invite = h("input.switch", { type: "checkbox", id: "edit-invite", checked: c.members_invite });
+  const hint = h("span.hint");
+  const slot = h("div.stack");
+  async function showMode(m) {
+    mode = m;
+    hint.textContent = SHARE_HINT[m];
+    slot.hidden = m !== "some";
+    if (m !== "some" || picker) return;
+    slot.replaceChildren(h("div.skeleton", { style: { height: "88px" } }));
+    try {
+      picker = peoplePicker(await call("share_people", { courseId: c.id }));
+      slot.replaceChildren(picker.el, h("div.row.between", h("label", { for: "edit-invite" }, "Mitglieder dürfen weitere Personen einladen"), invite));
+    } catch (e) {
+      slot.replaceChildren(h("p.muted", String(e?.message || e)));
+    }
+  }
+  const share = onServer
+    ? h("div.field", h("label", "Teilen"), segmented([["none", "Nur ich"], ["some", "Ausgewählte"], ["all", "Alle"]], mode, showMode, "Teilen"), hint, slot)
+    : null;
+  if (onServer) showMode(mode);
   const save = h("button.btn.block", { type: "button" }, "Speichern");
   const del = h("button.btn.ghost", { type: "button", style: { color: "var(--wrong)" } }, icon("trash"), "Kurs löschen");
   const s = openSheet({
     title: "Kurs bearbeiten",
-    body: [
-      h("div.field", h("label", { for: "edit-name" }, "Name"), name),
-      h("div.field", h("label", { for: "edit-date" }, "Prüfungsdatum"), date),
-      c.documents.length
-        ? h(
-            "div.field",
-            h("label", "Grafiken zum Beschriften"),
-            h("span.hint", "Für PDFs, die vor dieser Funktion eingelesen wurden: dieselbe Datei noch einmal wählen."),
-            ...c.documents.map((d) => h("button.btn.ghost", { type: "button", onclick: () => reloadFigures(d) }, icon("upload-simple"), d.name)),
-          )
-        : null,
-      share
-        ? h(
-            "div.field",
-            h("div.row.between", h("label", { for: "edit-share" }, "Mit allen auf diesem Server teilen"), share),
-            h("span.hint", "Alle Konten auf dem Server können dann mit diesem Kurs lernen und Fragen verbessern. Dein Fortschritt bleibt deiner."),
-          )
-        : null,
-      del,
-    ],
+    body: [h("div.field", h("label", { for: "edit-name" }, "Name"), name), h("div.field", h("label", { for: "edit-date" }, "Prüfungsdatum"), date), share, del],
     foot: save,
   });
   save.addEventListener("click", async () => {
     if (!name.value.trim()) return name.focus();
-    await call("update_course", { id: c.id, name: name.value, examDate: date.value || null, shared: share ? share.checked : null });
+    save.disabled = true;
+    try {
+      await call("update_course", {
+        id: c.id,
+        name: name.value,
+        examDate: date.value || null,
+        ...(onServer ? { share: mode, members: picker?.picked(), membersInvite: picker ? invite.checked : undefined } : {}),
+      });
+    } catch (e) {
+      save.disabled = false;
+      return fail(e);
+    }
     await loadCourses();
     emit("course-updated", c.id);
     emit("courses");
