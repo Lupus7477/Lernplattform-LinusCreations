@@ -257,9 +257,9 @@ function content(page) {
   drop.addEventListener("drop", (e) => {
     e.preventDefault();
     drop.classList.remove("over");
-    importFiles([...e.dataTransfer.files]);
+    importFiles(Array.from(e.dataTransfer.files));
   });
-  input.addEventListener("change", () => importFiles([...input.files]));
+  input.addEventListener("change", () => importFiles(Array.from(input.files)));
 
   async function targetCourse() {
     if (pick && pick.value !== "new") return Number(pick.value);
