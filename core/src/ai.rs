@@ -4,7 +4,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
@@ -57,6 +58,8 @@ pub fn tier(id: &str) -> &'static Tier {
 }
 
 const N_CTX: u32 = 4096;
+/// Weniger Platz für die Antwort lohnt nicht: dann ist die Eingabe zu lang.
+const MIN_ANSWER: usize = 64;
 const IDLE_UNLOAD: Duration = Duration::from_secs(180);
 // Android: CPU (Vulkan-Treiber dort zu unzuverlässig), sonst alles auf die GPU.
 const GPU_LAYERS: u32 = if cfg!(target_os = "android") { 0 } else { 999 };
@@ -112,8 +115,11 @@ pub struct Ai {
     dir: PathBuf,
     tier: Mutex<&'static Tier>,
     state: Mutex<State>,
-    // ponytail: ein Mutex um das Modell; interaktive Anfragen warten max. einen Hintergrund-Aufruf. Prioritäts-Queue, falls das stört.
+    // ponytail: ein Mutex um das Modell. Aufrufe aus der Oberfläche warten höchstens auf den laufenden Hintergrund-Aufruf,
+    // danach lässt der Worker ihnen den Vortritt (`waiting`). Echte Prioritäts-Queue, falls mehrere Oberflächen-Aufrufe sich stauen.
     model: Mutex<Option<LlamaModel>>,
+    /// Aufrufe aus der Oberfläche, die gerade auf das Modell warten
+    waiting: AtomicUsize,
     last_used: Mutex<Instant>,
     downloading: Mutex<bool>,
     emit: Emit,
@@ -143,6 +149,7 @@ impl Ai {
             emit,
             on_gpu: Mutex::new(None),
             last_speed: Mutex::new(None),
+            waiting: AtomicUsize::new(0),
         });
         let weak = Arc::downgrade(&ai);
         std::thread::spawn(move || loop {
@@ -266,13 +273,62 @@ impl Ai {
         }
     }
 
-    /// Erzeugt eine Antwort. `on_token` bekommt den Text stückweise (für Streaming).
-    pub fn generate(&self, g: Gen, mut on_token: impl FnMut(&str)) -> Result<String, AiError> {
-        if *self.state.lock().unwrap() != State::Ready {
-            return Err(AiError::NotReady);
+    /// Erzeugt eine Antwort für die Oberfläche (hat Vorrang vor dem Worker). `on_token` bekommt den Text stückweise.
+    pub fn generate(&self, g: Gen, on_token: impl FnMut(&str)) -> Result<String, AiError> {
+        let guard = self.wait_for_model(None)?;
+        self.generate_with(guard, g, on_token)
+    }
+
+    /// Wie `generate`, gibt aber nach `wait` auf, wenn der Worker das Modell so lange belegt.
+    pub fn generate_within(&self, wait: Duration, g: Gen, on_token: impl FnMut(&str)) -> Result<String, AiError> {
+        let guard = self.wait_for_model(Some(wait))?;
+        self.generate_with(guard, g, on_token)
+    }
+
+    /// Für den Hintergrund-Worker: wartet, solange Aufrufe aus der Oberfläche anstehen.
+    pub fn generate_background(&self, g: Gen, on_token: impl FnMut(&str)) -> Result<String, AiError> {
+        self.ensure_ready()?;
+        while self.waiting.load(Ordering::SeqCst) > 0 {
+            std::thread::sleep(Duration::from_millis(20));
         }
+        let guard = self.model.lock().unwrap();
+        self.generate_with(guard, g, on_token)
+    }
+
+    fn ensure_ready(&self) -> Result<(), AiError> {
+        if *self.state.lock().unwrap() == State::Ready {
+            Ok(())
+        } else {
+            Err(AiError::NotReady)
+        }
+    }
+
+    /// Modell für einen Aufruf aus der Oberfläche holen. Solange gewartet wird, lässt der Worker den Vortritt.
+    fn wait_for_model(&self, wait: Option<Duration>) -> Result<MutexGuard<'_, Option<LlamaModel>>, AiError> {
+        self.ensure_ready()?;
+        struct Waiting<'a>(&'a AtomicUsize);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let _waiting = Waiting(&self.waiting);
+        let deadline = wait.map(|w| Instant::now() + w);
+        loop {
+            if let Ok(guard) = self.model.try_lock() {
+                return Ok(guard);
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Err(AiError::Failed("Die KI ist gerade mit der Vorbereitung beschäftigt.".into()));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Lädt das Modell bei Bedarf und erzeugt die Antwort.
+    fn generate_with(&self, mut guard: MutexGuard<'_, Option<LlamaModel>>, g: Gen, mut on_token: impl FnMut(&str)) -> Result<String, AiError> {
         let t = *self.tier.lock().unwrap();
-        let mut guard = self.model.lock().unwrap();
         *self.last_used.lock().unwrap() = Instant::now();
         if guard.is_none() {
             let path = self.path(t);
@@ -363,7 +419,9 @@ fn run(model: &LlamaModel, g: Gen, on_token: &mut dyn FnMut(&str)) -> Result<(St
 
     let vocab = model.vocab();
     let tokens = vocab.tokenize(prompt.as_bytes(), false, true);
-    if tokens.len() + g.max_tokens > N_CTX as usize {
+    // Antwortlänge an den freien Kontext anpassen, statt bei großen Eingaben ganz abzubrechen
+    let max_tokens = g.max_tokens.min((N_CTX as usize).saturating_sub(tokens.len()));
+    if max_tokens < MIN_ANSWER {
         return Err(AiError::Failed(format!("Eingabe zu lang ({} Tokens)", tokens.len())));
     }
 
@@ -395,7 +453,7 @@ fn run(model: &LlamaModel, g: Gen, on_token: &mut dyn FnMut(&str)) -> Result<(St
     let mut pos = tokens.len() as i32;
     let started = Instant::now();
     let mut produced = 0usize;
-    for _ in 0..g.max_tokens {
+    for _ in 0..max_tokens {
         let idx = batch.n_tokens() - 1;
         let mut cand = ctx.token_data_array_ith(idx);
         cand.apply_sampler(&mut chain);

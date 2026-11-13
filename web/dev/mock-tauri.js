@@ -461,7 +461,7 @@ const handlers = {
     left = left.filter((c) => c.id !== courseId);
   },
   // Fehler melden (core/src/report.rs): Regeln wie im Kern, die KI ist hier nachgestellt
-  version: () => ({ version: "0.4.0-dev", repo: "Lupus7477/Lernplattform-LinusCreations", normal: ["kein zugriff", "eingescannt", "melde dich an", "nicht erreichbar", "passwort", "zu viele"] }),
+  version: () => ({ version: "0.4.0-dev", repo: "Lupus7477/Lernplattform-LinusCreations", normal: ["kein zugriff", "eingescannt", "melde dich an", "passwort", "zu viele", "kein gueltiges pdf"] }),
   device_info: () => ({ version: "0.4.0-dev", build: "debug", os: "linux", arch: "x86_64", os_name: "Mock-Linux", cpu_threads: 8, ram_total_mb: 16000, ram_free_mb: 9000, ki: { ...ai, backend: "Vulkan", on_gpu: true }, db: { schema: 4, courses: db.courses.length } }),
   triage_error: ({ message }) => {
     if (/typeerror|unbekannter befehl|undefined/i.test(message)) return { code: true, hint: "", by: "regel" };
@@ -473,9 +473,11 @@ const handlers = {
     body: `## Beschreibung (KI)\n\n(Mock) ${text}\n\n## Originaltext\n\n\`\`\`text\n${text}\n\`\`\`\n${error ? `\n## Fehlermeldung\n\n\`\`\`text\n${error}\n\`\`\`\n` : ""}${question ? `\n## Frage\n\n\`\`\`text\n${question}\n\`\`\`\n` : ""}\n<details><summary>Gerät</summary>\n\n\`\`\`json\n${JSON.stringify(device, null, 2)}\n\`\`\`\n</details>\n`,
     label: kind === "idea" ? "enhancement" : "bug",
   }),
-  report_issue: ({ device }) => {
+  report_issue: ({ device, auto, message }) => {
     if (!device) throw "Die Systemdaten des Geräts fehlen.";
-    return { number: 42, url: "https://github.com/Lupus7477/Lernplattform-LinusCreations/issues/42" };
+    const known = auto && reported.has(message);
+    if (auto) reported.add(message);
+    return { number: 42, url: "https://github.com/Lupus7477/Lernplattform-LinusCreations/issues/42", known };
   },
   delete_account: ({ current }) => {
     if (current !== "richtig-gutes-passwort") throw "Das aktuelle Passwort stimmt nicht.";
@@ -506,6 +508,7 @@ const handlers = {
 };
 let fails = 0;
 let left = [];
+const reported = new Set();
 function full(x) {
   return { id: x.id, unit_id: x.unit_id, kind: x.kind, prompt: x.prompt, options: x.options, answer: x.answer, why: x.why, groups: x.groups, spots: x.spots, figure_id: x.figure_id, hidden: x.hidden, marked: !!x.marked, mine: true, shared: !!db.courses[0]?.shared };
 }

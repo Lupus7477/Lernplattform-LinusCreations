@@ -59,11 +59,36 @@ struct Srv {
     cert_pem: Option<String>,
     /// Fehler melden: GitHub-Token (fine-grained, nur Issues dieses Repos) aus `LERNPFAD_GITHUB_TOKEN`
     github_token: Option<String>,
-    /// Gesendete Meldungen je Konto (für das Limit pro Stunde)
-    reports: Mutex<HashMap<i64, Vec<Instant>>>,
+    /// Meldungen und KI-Aufrufe dafür je Konto und Stunde
+    hourly: Hourly,
+    /// Schon automatisch gemeldete Programmfehler (Schlüssel → Nummer, Link), damit jeder nur ein Issue bekommt
+    // ponytail: nur bis zum Neustart. Danach kann derselbe Fehler ein zweites Issue bekommen; GitHub-Suche, falls das stört.
+    reported: Mutex<HashMap<String, (i64, String)>>,
 }
 
-const REPORTS_PER_HOUR: usize = 5;
+/// Meldungen an GitHub pro Konto und Stunde (selbst geschrieben oder automatisch)
+const POSTS_PER_HOUR: usize = 5;
+/// KI-Aufrufe für Meldungen (Einschätzen, Entwurf) pro Konto und Stunde: das Modell soll für die Vorbereitung frei bleiben
+const DRAFTS_PER_HOUR: usize = 30;
+
+/// Zählt Aufrufe je Konto und Art in einem gleitenden Stundenfenster.
+#[derive(Default)]
+struct Hourly(Mutex<HashMap<(i64, &'static str), Vec<Instant>>>);
+
+impl Hourly {
+    /// Zählt den Aufruf mit, wenn noch Platz ist. Sonst die Sekunden, bis wieder einer frei wird.
+    fn take(&self, user: i64, kind: &'static str, limit: usize) -> Result<(), u64> {
+        let now = Instant::now();
+        let mut m = self.0.lock().unwrap();
+        let times = m.entry((user, kind)).or_default();
+        times.retain(|t| now.duration_since(*t) < Duration::from_secs(3600));
+        if times.len() >= limit {
+            return Err(3600 - now.duration_since(times[0]).as_secs().min(3599));
+        }
+        times.push(now);
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 struct Ev {
@@ -194,7 +219,8 @@ async fn run() -> Result<(), String> {
         pin,
         cert_pem,
         github_token,
-        reports: Mutex::new(HashMap::new()),
+        hourly: Hourly::default(),
+        reported: Mutex::new(HashMap::new()),
     });
     let app = Router::new()
         .route("/api/rpc/{cmd}", post(rpc))
@@ -379,7 +405,7 @@ async fn rpc(State(s): State<Arc<Srv>>, ConnectInfo(peer): ConnectInfo<SocketAdd
     match cmd.as_str() {
         "logout" | "change_password" | "delete_account" | "sessions_list" | "session_revoke" | "sessions_revoke_others" | "members" | "member_disable"
         | "invite_create" | "connect_link" => account(&s, &cmd, args, sess, ip, &h, &uri).await,
-        "draft_issue" | "report_issue" => issue(&s, who, &cmd, args).await,
+        "triage_error" | "draft_issue" | "report_issue" => issue(&s, who, &cmd, args).await,
         "explain" | "ask" => stream_call(&s, who, cmd, args),
         _ => {
             let core = s.core.clone();
@@ -388,40 +414,53 @@ async fn rpc(State(s): State<Arc<Srv>>, ConnectInfo(peer): ConnectInfo<SocketAdd
     }
 }
 
-/// Meldungen: Systemdaten des Servers und die Einschätzung eines Fehlers setzt immer der Server selbst,
-/// der Client kann sie weder weglassen noch vorgeben. `report_issue` legt das Issue auf GitHub an.
+fn too_many(message: &str, secs: u64) -> Response {
+    (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, secs.to_string())], Json(json!({ "error": message, "retry_after": secs }))).into_response()
+}
+
+/// Fehler melden. Systemdaten des Servers und die Einschätzung eines Fehlers setzt immer der Server selbst,
+/// der Client kann sie weder weglassen noch vorgeben. `report_issue` legt das Issue auf GitHub an;
+/// automatische Meldungen desselben Fehlers bekommen das schon angelegte Issue zurück.
 async fn issue(s: &Arc<Srv>, who: Who, cmd: &str, mut args: Value) -> Response {
     let post = cmd == "report_issue";
-    let token = s.github_token.clone();
-    if post {
-        if token.is_none() {
-            return text(StatusCode::NOT_IMPLEMENTED, "Auf diesem Server ist Fehler melden nicht eingerichtet.");
-        }
-        let now = Instant::now();
-        let mut r = s.reports.lock().unwrap();
-        let sent = r.entry(who.id).or_default();
-        sent.retain(|t| now.duration_since(*t) < Duration::from_secs(3600));
-        if sent.len() >= REPORTS_PER_HOUR {
-            let wait = 3600 - now.duration_since(sent[0]).as_secs().min(3599);
-            let body = Json(json!({ "error": "Du hast in der letzten Stunde schon 5 Meldungen geschickt. Versuch es später noch einmal.", "retry_after": wait }));
-            return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, wait.to_string())], body).into_response();
-        }
+    if post && s.github_token.is_none() {
+        return text(StatusCode::NOT_IMPLEMENTED, "Auf diesem Server ist Fehler melden nicht eingerichtet.");
+    }
+    let (kind, limit, why) = if post {
+        ("post", POSTS_PER_HOUR, "Du hast in der letzten Stunde schon 5 Meldungen geschickt. Versuch es später noch einmal.")
+    } else {
+        ("draft", DRAFTS_PER_HOUR, "Zu viele Meldungen in kurzer Zeit. Versuch es später noch einmal.")
+    };
+    if let Err(secs) = s.hourly.take(who.id, kind, limit) {
+        return too_many(why, secs);
     }
     let s2 = s.clone();
+    let cmd = cmd.to_string();
     let res = blocking(move || -> Result<Value, String> {
+        let core = &s2.core;
+        if cmd == "triage_error" {
+            let (message, at) = (args["message"].as_str().unwrap_or_default(), args["cmd"].as_str().unwrap_or_default());
+            return serde_json::to_value(report::triage(&core.ai, message, at)).map_err(|e| e.to_string());
+        }
         if let Some(o) = args.as_object_mut() {
             o.remove("triage");
-            o.insert("server".into(), report::system_info(&s2.core));
+            o.insert("server".into(), report::system_info(core));
         }
         let input: report::Input = serde_json::from_value(args).map_err(|e| e.to_string())?;
-        let d = report::make(&s2.core.ai, input)?;
+        let key = report::fingerprint(&input);
+        if let Some((number, url)) = key.as_ref().and_then(|k| s2.reported.lock().unwrap().get(k).cloned()) {
+            return Ok(json!({ "number": number, "url": url, "known": true }));
+        }
+        let d = report::make(&core.ai, input)?;
         if !post {
             return serde_json::to_value(d).map_err(|e| e.to_string());
         }
-        let (number, url) = report::post_issue(token.as_deref().unwrap_or_default(), &d)?;
-        s2.reports.lock().unwrap().entry(who.id).or_default().push(Instant::now());
+        let (number, url) = report::post_issue(s2.github_token.as_deref().unwrap_or_default(), &d)?;
+        if let Some(k) = key {
+            s2.reported.lock().unwrap().insert(k, (number, url.clone()));
+        }
         eprintln!("[melden] Issue #{number} angelegt");
-        Ok(json!({ "number": number, "url": url }))
+        Ok(json!({ "number": number, "url": url, "known": false }))
     })
     .await;
     core_result(res)
@@ -778,4 +817,20 @@ async fn secure_headers(State(s): State<Arc<Srv>>, req: Request, next: Next) -> 
         h.insert(header::STRICT_TRANSPORT_SECURITY, HeaderValue::from_static("max-age=31536000"));
     }
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hourly_limit_per_user_and_kind() {
+        let h = Hourly::default();
+        for _ in 0..5 {
+            h.take(1, "post", 5).unwrap();
+        }
+        assert!(h.take(1, "post", 5).unwrap_err() > 3500, "6. Meldung wartet fast eine Stunde");
+        assert!(h.take(2, "post", 5).is_ok(), "andere Konten zählen getrennt");
+        assert!(h.take(1, "draft", 30).is_ok(), "andere Art zählt getrennt");
+    }
 }

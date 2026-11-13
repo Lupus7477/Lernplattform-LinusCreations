@@ -1,6 +1,10 @@
 //! Fehler melden: Systemdaten, Vorsortieren (Programmfehler oder normaler Hinweis), KI-Beschreibung und Issue-Text für GitHub.
 //! Der Server legt das Issue an (`post_issue`); ohne Server öffnet die Oberfläche ein vorausgefülltes Issue im Browser.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -11,15 +15,17 @@ use crate::Core;
 pub const REPO: &str = "Lupus7477/Lernplattform-LinusCreations";
 
 /// Teile von Meldungen, die der Code selbst für Nutzer schreibt: kein Programmfehler (Vergleich nach `normalize`).
+/// Bewusst nicht dabei: „nicht erreichbar“ und „zu groß“. Das kann auch ein Absturz des Servers oder ein Fehler beim
+/// Einlesen sein. Ob jemand wirklich offline ist, prüft die Oberfläche selbst (`navigator.onLine`).
 pub const NORMAL: &[&str] = &[
     "kein zugriff",
     "eingescannt",
     "melde dich an",
-    "nicht erreichbar",
-    "verbindung zum server ist abgebrochen",
     "zu viele",
     "wird noch vorbereitet",
-    "zu gross",
+    "mit der vorbereitung beschaeftigt",
+    "beschreib kurz",
+    "kein gueltiges pdf",
     "passwort",
     "der name braucht",
     "im namen gehen nur",
@@ -115,9 +121,13 @@ pub fn system_info(c: &Core) -> Value {
 
 const SYSTEM: &str = "Du hilfst den Entwicklern einer Lern-App, Rückmeldungen zu ordnen. Antworte sachlich und auf Deutsch.";
 
+/// Höchstens so lange warten Meldungen auf die KI, wenn der Worker sie belegt. Danach geht es ohne KI weiter.
+const WAIT: Duration = Duration::from_secs(15);
+
 fn ask<T: for<'de> Deserialize<'de>>(ai: &Ai, user: String, schema: &Value, max_tokens: usize) -> Result<T, AiError> {
     let g = llama_cpp_2::json_schema_to_grammar(&schema.to_string()).map_err(|e| AiError::Failed(format!("Grammatik: {e}")))?;
-    let raw = ai.generate(
+    let raw = ai.generate_within(
+        WAIT,
         Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(&g), max_tokens, temperature: 0.1 },
         |_| {},
     )?;
@@ -144,10 +154,35 @@ pub fn triage_rule(message: &str) -> Option<bool> {
     }
 }
 
+/// Einschätzungen der KI je (Befehl, Meldung). Die Oberfläche fragt zuerst, die Meldung danach noch einmal:
+/// so rechnet die KI nur einmal.
+// ponytail: Speicher nur bis zum Neustart, bei über 200 Einträgen wird geleert. LRU, falls das je stört.
+fn cache() -> &'static Mutex<HashMap<String, Triage>> {
+    static C: OnceLock<Mutex<HashMap<String, Triage>>> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
 pub fn triage(ai: &Ai, message: &str, cmd: &str) -> Triage {
+    let message = head(message, 2000);
     if let Some(code) = triage_rule(message) {
         return Triage { code, hint: String::new(), by: "regel".into() };
     }
+    let key = format!("{cmd}\n{message}");
+    if let Some(t) = cache().lock().unwrap().get(&key) {
+        return t.clone();
+    }
+    let t = triage_ai(ai, message, cmd);
+    if t.by == "ki" {
+        let mut c = cache().lock().unwrap();
+        if c.len() > 200 {
+            c.clear();
+        }
+        c.insert(key, t.clone());
+    }
+    t
+}
+
+fn triage_ai(ai: &Ai, message: &str, cmd: &str) -> Triage {
     #[derive(Deserialize)]
     struct R {
         art: String,
@@ -179,14 +214,14 @@ pub fn draft(ai: &Ai, kind: &str, text: &str, error: &str) -> (String, String, b
     let schema = json!({"type": "object", "required": ["title", "description"], "properties": {
         "title": {"type": "string", "maxLength": 90}, "description": {"type": "string", "maxLength": 700}}});
     let art = if kind == "idea" { "Idee oder Wunsch" } else { "Fehler" };
+    let said = if text.trim().is_empty() { "(keiner: automatisch gemeldet)".to_string() } else { format!("\"\"\"\n{}\n\"\"\"", head(text, 3000)) };
     let err = if error.is_empty() { String::new() } else { format!("\nFehlermeldung:\n\"\"\"\n{}\n\"\"\"", head(error, 1500)) };
     let user = format!(
-        "Schreibe aus dieser Rückmeldung zu einer Lern-App ein GitHub-Issue.\nArt: {art}\nText der Person:\n\"\"\"\n{}\n\"\"\"{err}\n\n\
+        "Schreibe aus dieser Rückmeldung zu einer Lern-App ein GitHub-Issue.\nArt: {art}\nText der Person: {said}{err}\n\n\
          title: höchstens 10 Wörter, sachlich.\n\
-         description: 2 bis 5 Sätze: was passiert ist oder gewünscht wird, wobei, und was zu erwarten wäre. Erfinde nichts, was nicht oben steht.",
-        head(text, 3000)
+         description: 2 bis 5 Sätze: was passiert ist oder gewünscht wird, wobei, und was zu erwarten wäre. Erfinde nichts, was nicht oben steht."
     );
-    match ask::<R>(ai, user, &schema, 400) {
+    match ask::<R>(ai, user, &schema, 300) {
         Ok(r) if !r.title.trim().is_empty() => (r.title.trim().to_string(), r.description.trim().to_string(), true),
         _ => {
             let first = text.lines().chain(error.lines()).find(|l| !l.trim().is_empty()).unwrap_or(art);
@@ -236,6 +271,9 @@ pub struct Input {
     pub message: String,
     #[serde(default)]
     pub cmd: String,
+    /// Von der App selbst gemeldet (Programmfehler), ohne Text der Person
+    #[serde(default)]
+    pub auto: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -245,27 +283,39 @@ pub struct Draft {
     pub label: &'static str,
 }
 
-/// Prüft die Eingabe einer Meldung. Systemdaten des Geräts sind Pflicht.
-pub fn check(i: &Input) -> Result<(), String> {
-    let n = |s: &str| s.chars().count();
+/// Lange Teile werden gekürzt statt abgelehnt: eine Meldung soll nie an ihrer eigenen Fehlerliste scheitern.
+fn clip(s: &mut String, n: usize) {
+    if s.chars().count() > n {
+        *s = format!("{}\n… (gekürzt)", head(s, n));
+    }
+}
+
+/// Prüft und kürzt eine Meldung. Systemdaten des Geräts sind Pflicht.
+pub fn prepare(i: &mut Input) -> Result<(), String> {
     if i.kind != "bug" && i.kind != "idea" {
         return Err("Unbekannte Art der Meldung".into());
     }
-    if !i.device.is_object() || i.device.as_object().is_some_and(|o| o.is_empty()) {
+    if !i.device.as_object().is_some_and(|o| !o.is_empty()) || i.device.to_string().len() > 16_000 {
         return Err("Die Systemdaten des Geräts fehlen.".into());
     }
-    if i.error.is_empty() && n(i.text.trim()) < 10 {
+    if i.error.is_empty() && i.text.trim().chars().count() < 10 {
         return Err("Beschreib kurz in ein paar Worten, worum es geht.".into());
     }
-    if n(&i.text) > 4000 || n(&i.error) > 8000 || n(&i.question) > 8000 || i.device.to_string().len() > 8000 {
-        return Err("Die Meldung ist zu lang.".into());
-    }
+    clip(&mut i.text, 4000);
+    clip(&mut i.error, 8000);
+    clip(&mut i.question, 8000);
     Ok(())
+}
+
+/// Gleicher Programmfehler = gleicher Schlüssel (Befehl + Meldung ohne Ziffern), damit er nur einmal gemeldet wird.
+/// Nur für automatische Meldungen: Wer selbst schreibt, hat etwas Eigenes zu sagen.
+pub fn fingerprint(i: &Input) -> Option<String> {
+    i.auto.then(|| format!("{}\n{}", i.cmd, normalize(&i.message).replace(|c: char| c.is_ascii_digit(), "")))
 }
 
 /// Issue-Text: KI-Beschreibung, Einschätzung, Originaltext, Fehlermeldung, Frage, Gerät und Server.
 pub fn body(i: &Input, description: &str, by_ai: bool, triage: Option<&Triage>) -> String {
-    let mut b = String::from("## Beschreibung (KI)\n\n");
+    let mut b = String::from(if i.auto { "_Von der App automatisch gemeldet._\n\n## Beschreibung (KI)\n\n" } else { "## Beschreibung (KI)\n\n" });
     b.push_str(&if by_ai && !description.is_empty() { plain(description) } else { "_(ohne KI: siehe Originaltext)_".into() });
     b.push_str("\n\n");
     if let Some(t) = triage {
@@ -303,7 +353,7 @@ pub fn body(i: &Input, description: &str, by_ai: bool, triage: Option<&Triage>) 
 
 /// Titel, Text und Label eines Issues. Bei einer Fehlermeldung ohne Einschätzung schätzt die KI sie hier ein.
 pub fn make(ai: &Ai, mut i: Input) -> Result<Draft, String> {
-    check(&i)?;
+    prepare(&mut i)?;
     let triage = match (i.triage.take(), i.message.is_empty()) {
         (Some(t), _) => Some(t),
         (None, false) => Some(triage(ai, &i.message, &i.cmd)),
@@ -342,7 +392,8 @@ mod tests {
     fn triage_rules() {
         assert_eq!(triage_rule(crate::api::DENIED), Some(false));
         assert_eq!(triage_rule("In diesem PDF wurde kein Text gefunden. Ist es eingescannt?"), Some(false));
-        assert_eq!(triage_rule("Der Server ist gerade nicht erreichbar."), Some(false));
+        assert_eq!(triage_rule("Der Server ist gerade nicht erreichbar."), None, "kann auch ein Absturz sein");
+        assert_eq!(triage_rule("Die Anfrage ist zu groß."), None, "die App hat sie selbst gebaut");
         assert_eq!(triage_rule("TypeError: x is undefined"), Some(true));
         assert_eq!(triage_rule("no such column: u.exam"), Some(true));
         assert_eq!(triage_rule("Irgendwas Seltsames"), None);
@@ -357,14 +408,23 @@ mod tests {
             server: json!({"version": "0.3.0"}),
             ..Default::default()
         };
-        check(&i).unwrap();
+        let mut i = i;
+        prepare(&mut i).unwrap();
         let b = body(&i, "Beschreibung mit @jemand und ![bild](x)", true, Some(&Triage { code: true, hint: "Absturz".into(), by: "ki".into() }));
         assert!(b.contains("<summary>Gerät</summary>") && b.contains("<summary>Server</summary>"));
         assert!(b.contains("\"os\": \"linux\"") && b.contains("Programmfehler (laut KI): Absturz"));
         assert!(!b.contains("@jemand") && !b.contains("![bild]"));
         // Originaltext im Code-Block, dessen Zaun sich nicht schließen lässt
         assert!(b.contains("```text\nKlappt nicht, frag @octocat '''rm'''\n```"));
-        // Ohne Gerät keine Meldung
-        assert!(check(&Input { device: Value::Null, ..i }).is_err());
+        // Ohne Gerät keine Meldung; zu lange Fehlerlisten werden gekürzt statt abgelehnt
+        let mut long = Input { kind: "bug".into(), error: "x".repeat(20_000), device: json!({"os": "linux"}), ..Default::default() };
+        prepare(&mut long).unwrap();
+        assert!(long.error.chars().count() < 8100 && long.error.ends_with("(gekürzt)"));
+        assert!(prepare(&mut Input { device: Value::Null, ..i }).is_err());
+
+        // Automatische Meldungen: derselbe Fehler mit anderer ID ergibt denselben Schlüssel
+        let auto = |m: &str| Input { auto: true, cmd: "unit".into(), message: m.into(), ..Default::default() };
+        assert_eq!(fingerprint(&auto("no such column 17")), fingerprint(&auto("no such column 4")));
+        assert_eq!(fingerprint(&Input { auto: false, ..auto("x") }), None);
     }
 }

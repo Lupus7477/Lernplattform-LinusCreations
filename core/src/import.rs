@@ -269,8 +269,8 @@ pub fn analyze(ai: &Ai, course: &str, text: &str, filter: bool) -> Result<UnitIn
          - terms: die 3–6 wichtigsten Fachbegriffe, je mit einer kurzen Definition in einem Satz. Nichts Organisatorisches."
     );
     let g = llama_cpp_2::json_schema_to_grammar(&schema).map_err(|e| AiError::Failed(format!("Grammatik: {e}")))?;
-    let raw = ai.generate(
-        Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(&g), max_tokens: 800 + 12 * n, temperature: 0.3 },
+    let raw = ai.generate_background(
+        Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(&g), max_tokens: 600 + 12 * n, temperature: 0.3 },
         |_| {},
     )?;
     let mut info: UnitInfo = serde_json::from_str(&raw).map_err(|e| AiError::Failed(format!("Antwort unlesbar: {e}")))?;
@@ -357,7 +357,7 @@ pub fn generate_questions(ai: &Ai, text: &str, level: i64, topics: &[String]) ->
          Nur Fragen zum fachlichen Inhalt, nichts Organisatorisches (Termine, Klausur, Dozenten, Literatur). \
          Keine Verweise auf Seiten, Kapitel, Folien oder das Skript."
     );
-    let raw = ai.generate(
+    let raw = ai.generate_background(
         Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(grammar(&G, QUESTION_SCHEMA)), max_tokens: 1700, temperature: 0.5 },
         |_| {},
     )?;
@@ -398,7 +398,7 @@ pub fn generate_tasks(ai: &Ai, text: &str, level: i64, topics: &[String]) -> Res
         focus(level),
         exam_line(topics)
     );
-    let raw = ai.generate(
+    let raw = ai.generate_background(
         Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(grammar(&G, TASK_SCHEMA)), max_tokens: 900, temperature: 0.4 },
         |_| {},
     )?;
@@ -420,7 +420,7 @@ fn grounded(q: &Question, text: &str) -> bool {
 /// JSON-Antwort mit einer Grammatik, die erst zur Laufzeit feststeht (Enums aus der Aufgabe).
 fn ask_json<T: DeserializeOwned>(ai: &Ai, user: String, schema: &Value, max_tokens: usize) -> Result<T, AiError> {
     let g = llama_cpp_2::json_schema_to_grammar(&schema.to_string()).map_err(|e| AiError::Failed(format!("Grammatik: {e}")))?;
-    let raw = ai.generate(
+    let raw = ai.generate_background(
         Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(&g), max_tokens, temperature: 0.1 },
         |_| {},
     )?;

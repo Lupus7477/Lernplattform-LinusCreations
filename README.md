@@ -92,7 +92,10 @@ Profil → **Über Lernpfad** → „Fehler melden“ oder „Idee vorschlagen�
   - die Frage, wenn sie aus dem Fragen-Menü kommt
   - **immer die Systemdaten des Geräts und des Servers**: Version, Betriebssystem, CPU, RAM, KI-Stufe, GPU-Backend und -Gerät, letzte Geschwindigkeit, Größe der Datenbank
   - Nicht enthalten sind Name, IP, Hostname und Pfade. Was mitgeht, lässt sich vor dem Senden aufklappen.
-- **Mit eigenem Server:** Der Server legt das Issue direkt an, niemand braucht ein GitHub-Konto. Seine Systemdaten und die Einschätzung hängt er selbst an. Höchstens 5 Meldungen pro Konto und Stunde. Dafür braucht der Server einen fine-grained Token, nur für dieses Repo, mit „Issues: Read and write“:
+- **Mit eigenem Server:** Der Server legt das Issue direkt an, niemand braucht ein GitHub-Konto. Seine Systemdaten und die Einschätzung hängt er selbst an.
+  - **Automatisch:** Erkennt die App einen Programmfehler sicher (Regel oder KI), meldet sie ihn selbst. Der Toast zeigt dann „Fehler automatisch gemeldet (#12)“. Derselbe Fehler bekommt nur ein Issue, weitere Fälle verweisen darauf.
+  - Ist die KI gerade mit der Vorbereitung beschäftigt, wartet die Meldung höchstens 15 Sekunden auf sie und geht dann ohne KI-Text raus. Automatisch gemeldet wird in dem Fall nichts, der Toast bietet stattdessen „Melden“ an.
+  - **Grenzen pro Konto und Stunde:** 5 Meldungen an GitHub, 30 KI-Aufrufe zum Einschätzen und Formulieren. Dafür braucht der Server einen fine-grained Token, nur für dieses Repo, mit „Issues: Read and write“:
   ```yaml
   # compose.override.yaml
   services:
@@ -100,7 +103,7 @@ Profil → **Über Lernpfad** → „Fehler melden“ oder „Idee vorschlagen�
       environment:
         LERNPFAD_GITHUB_TOKEN: github_pat_…
   ```
-- **Ohne Server (oder ohne Token):** Die App öffnet ein vorausgefülltes Issue im Browser. Zum Absenden braucht man dort ein GitHub-Konto. Wird der Text zu lang für den Link, kürzt die App zuerst Fehlerliste und Frage, nie die Systemdaten.
+- **Ohne Server (oder ohne Token):** Die App schreibt die Meldung fertig und zeigt dann den Knopf „Auf GitHub absenden“. Ein echter Link wird von keinem Browser als Popup blockiert. Zum Absenden braucht man dort ein GitHub-Konto. Wird der Text zu lang für den Link, kürzt die App zuerst Fehlerliste und Frage, nie die Systemdaten. Ist auch der Kern nicht erreichbar, baut die Oberfläche die Meldung ohne KI selbst.
 - Nutzertext steht im Issue in Code-Blöcken, @-Erwähnungen, Links und Bilder werden also nicht dargestellt.
 
 ## KI

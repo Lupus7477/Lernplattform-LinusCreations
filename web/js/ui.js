@@ -72,19 +72,51 @@ export function openExternal(url) {
 }
 
 // ---------- Rückmeldungen ----------
-/** Kurze Meldung. Mit `action` (z. B. „Rückgängig“) bleibt sie länger stehen. */
-export function toast(message, { action, onAction } = {}) {
-  const el = h("div.toast", { role: "status", "aria-live": "polite" }, h("span", message));
+const TOAST_MS = { info: 4000, action: 7000, error: 12000 };
+let toasts;
+
+/** Zeitgeber, den man anhalten kann (Toast unter Maus oder Fokus bleibt stehen). */
+function pausable(fn, ms) {
+  let left = ms;
+  let started = 0;
+  let id = 0;
+  const resume = () => {
+    started = Date.now();
+    id = setTimeout(fn, left);
+  };
+  const pause = () => {
+    clearTimeout(id);
+    left = Math.max(1500, left - (Date.now() - started));
+  };
+  resume();
+  return { pause, resume, stop: () => clearTimeout(id) };
+}
+
+/**
+ * Kurze Meldung unten. Mehrere stapeln sich statt sich zu verdecken.
+ * `action` (z. B. „Rückgängig“) und `error` (Fehler, mit ×) bleiben länger stehen; unter Maus oder Fokus bleibt jede stehen.
+ */
+export function toast(message, { action, onAction, error = false } = {}) {
+  toasts ??= document.body.appendChild(h("div.toasts"));
+  const el = h(`div.toast${error ? ".is-error" : ""}`, { role: error ? "alert" : "status" }, h("span.toast-text", message));
   let gone = false;
   const hide = () => {
     if (gone) return;
     gone = true;
+    timer.stop();
     el.style.opacity = "0";
     setTimeout(() => el.remove(), 220);
   };
   if (action) el.append(h("button.toast-action", { type: "button", onclick: () => (hide(), onAction()) }, action));
-  document.body.append(el);
-  setTimeout(hide, action ? 5000 : 3200);
+  if (error) el.append(h("button.toast-close", { type: "button", "aria-label": "Meldung schließen", onclick: hide }, icon("x")));
+  toasts.append(el);
+  while (toasts.childElementCount > 3) toasts.firstElementChild.remove();
+  const timer = pausable(hide, error ? TOAST_MS.error : action ? TOAST_MS.action : TOAST_MS.info);
+  el.addEventListener("pointerenter", timer.pause);
+  el.addEventListener("pointerleave", timer.resume);
+  el.addEventListener("focusin", timer.pause);
+  el.addEventListener("focusout", timer.resume);
+  return { hide };
 }
 
 /** Umschalter aus Knöpfen (aria-pressed). `options` = [[wert, text], …] */

@@ -49,7 +49,7 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
         "version" => ok(json!({ "version": env!("CARGO_PKG_VERSION"), "repo": report::REPO, "normal": report::NORMAL })),
         "triage_error" => {
             let (message, cmd) = args!(v, { message: String, cmd: Option<String> });
-            ok(report::triage(&c.ai, head(&message, 2000), cmd.as_deref().unwrap_or("")))
+            ok(report::triage(&c.ai, &message, cmd.as_deref().unwrap_or("")))
         }
         // Issue-Text für den Link ohne Server; der Server ruft das mit seinen eigenen Systemdaten auf.
         "draft_issue" => ok(report::make(&c.ai, serde_json::from_value(v).map_err(err)?)?),

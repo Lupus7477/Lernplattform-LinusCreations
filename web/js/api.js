@@ -4,6 +4,24 @@
 //  - Entwicklung im Browser: dev/mock-tauri.js setzt ein nachgebautes __TAURI__
 const T = () => window.__TAURI__;
 
+/** Text eines Fehlers, überall gleich (Befehle liefern Text, JS wirft Error-Objekte). */
+export function message(e) {
+  if (typeof e === "string") return e;
+  if (e instanceof Error) return `${e.name}: ${e.message}`;
+  return e?.message || String(e);
+}
+
+// Einzelne UTF-16-Hälften (kaputte PDF-Textebene, abgeschnittene Emojis) lehnt der Kern beim JSON-Lesen ab.
+// Deshalb wird jeder Text vor dem Senden repariert: Paare bleiben, einzelne Hälften werden zu �.
+const SURROGATES = /[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g;
+const wellFormed = (s) => (s.toWellFormed ? s.toWellFormed() : s.replace(SURROGATES, (m) => (m.length === 2 ? m : "\uFFFD")));
+function sanitize(v) {
+  if (typeof v === "string") return wellFormed(v);
+  if (Array.isArray(v)) return v.map(sanitize);
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, sanitize(x)]));
+  return v;
+}
+
 /** Server sagt 401: Sitzung abgelaufen oder abgemeldet → main.js zeigt die Anmeldung. */
 const loggedOut = () => dispatchEvent(new Event("lernpfad:logged-out"));
 
@@ -64,17 +82,19 @@ function tauri(name, payload) {
 /** Abgelehnte Befehle melden (für „Fehler melden“: letzte Fehler samt Befehl). */
 function noted(cmd, p) {
   return p.catch((e) => {
-    dispatchEvent(new CustomEvent("lernpfad:error", { detail: { cmd, message: typeof e === "string" ? e : e?.message || String(e) } }));
+    dispatchEvent(new CustomEvent("lernpfad:error", { detail: { cmd, message: message(e) } }));
     throw e;
   });
 }
 
 export function call(cmd, args = {}) {
+  args = sanitize(args);
   return noted(cmd, T() ? tauri("rpc", { cmd, args }) : http(cmd, args));
 }
 
 /** Befehl mit gestreamter Antwort: `onPiece` bekommt den Text stückweise. */
 export function stream(cmd, args, onPiece) {
+  args = sanitize(args);
   if (!T()) return noted(cmd, http(cmd, args, onPiece));
   const ch = new (T().core.Channel)();
   ch.onmessage = onPiece;

@@ -1,10 +1,15 @@
 // Hinzufügen: Kurs anlegen, PDF einlesen (pdf.js, läuft in jeder WebView), Fortschritt der Vorbereitung.
-import { call } from "./api.js";
+import { call, message } from "./api.js";
 import { confirmSheet, flip, fmtDate, h, icon, openSheet, segmented, toast } from "./ui.js";
 import { aiNotice, currentCourse, emit, loadCourses, selectCourse, state, subscribe } from "./state.js";
 import { fail } from "./report.js";
 
 let pdfjs;
+/** Fehler von pdf.js, die an der Datei liegen, nicht am Programm (in `report::NORMAL`: kein „Melden“). */
+const PDF_PROBLEMS = {
+  InvalidPDFException: "Diese Datei ist kein gültiges PDF oder beschädigt. Speichere sie neu als PDF und versuch es noch einmal.",
+  PasswordException: "Dieses PDF ist mit einem Passwort geschützt. Speichere es ohne Passwort und versuch es noch einmal.",
+};
 /** Liest Text und Grafiken zum Beschriften. Eine Seite ohne erkennbare Grafik kostet nur das Operator-Lesen. `withFigures: false` = nur Text. */
 async function readPdf(file, onPage, { withFigures = true } = {}) {
   pdfjs ??= await import("../vendor/pdf.min.mjs").then((m) => {
@@ -12,17 +17,23 @@ async function readPdf(file, onPage, { withFigures = true } = {}) {
     return m;
   });
   const task = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false });
-  const doc = await task.promise;
+  const doc = await task.promise.catch((e) => {
+    throw PDF_PROBLEMS[e?.name] || e;
+  });
   const pages = [];
   const figures = [];
+  let bytes = 0;
   for (let n = 1; n <= doc.numPages; n++) {
     const page = await doc.getPage(n);
     const content = await page.getTextContent();
     pages.push(content.items.map((it) => (it.str ?? "") + (it.hasEOL ? "\n" : " ")).join(""));
-    if (withFigures && figures.length < FIG.maxFigures) {
+    if (withFigures && figures.length < FIG.maxFigures && bytes < FIG.maxBytes) {
       try {
         const f = await findFigure(page, content);
-        if (f) figures.push({ page: n, ...f });
+        if (f && bytes + f.image.length <= FIG.maxBytes) {
+          figures.push({ page: n, ...f });
+          bytes += f.image.length;
+        }
       } catch (e) {
         console.warn(`Grafik auf Seite ${n} übersprungen:`, e);
       }
@@ -36,7 +47,8 @@ async function readPdf(file, onPage, { withFigures = true } = {}) {
 
 // ---------- Grafiken zum Beschriften (ohne KI: die Beschriftung steht als Text im PDF) ----------
 // ponytail: Faustregeln für Folien-PDFs. Greifen sie daneben, hier nachjustieren; schlechte Aufgaben kann man ausblenden.
-const FIG = { maxFigures: 30, maxSpots: 8, maxPx: 2000, minLabels: 3, bigImage: 0.25, near: 0.04 };
+// maxBytes: alle Bilder zusammen, damit ein Import sicher unter der 64-MB-Grenze des Servers bleibt.
+const FIG = { maxFigures: 30, maxBytes: 24_000_000, maxSpots: 8, maxPx: 2000, minLabels: 3, bigImage: 0.25, near: 0.04 };
 const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
 const at = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
 const bbox = (pts) => {
@@ -178,7 +190,7 @@ async function findFigure(page, content) {
       it.y + it.h < H * 0.93 &&
       boxes.some((b) => near(it, b)),
   );
-  const heading = title?.str.slice(0, 80) ?? "";
+  const heading = Array.from(title?.str ?? "").slice(0, 80).join(""); // nach Zeichen, nicht UTF-16-Hälften
   // Ohne echtes Bild nur, wenn die Beschriftungen über mind. 2 Spalten verteilt sind: sonst ist es eine Aufzählung im Kasten.
   const columns = new Set(labels.map((l) => Math.round(l.x / (W * 0.08)))).size;
   if (columns < 2 && !boxes.some((b) => b.image && labels.some((l) => near(l, b)))) labels.length = 0;
@@ -208,22 +220,90 @@ async function findFigure(page, content) {
   return crop ? { title: heading, ...crop } : null;
 }
 
+// Fortschritt und Fehler des Einlesens: einmal angelegt, damit Neuzeichnen und Seitenwechsel sie nicht löschen.
+const status = h("div.stack", { role: "status", "aria-live": "polite" });
+// Während eines Imports wird nicht neu gezeichnet (Eingaben und Fortschritt bleiben stehen); danach einmal.
+let importing = false;
+
 export async function render() {
   const page = h("div.page");
   const draw = () => page.replaceChildren(...content(page));
   draw();
   page.cleanup = subscribe((kind) => {
-    if (document.querySelector(".doc.is-dragging")) return; // nicht mitten im Ziehen neu zeichnen
+    if (importing || document.querySelector(".doc.is-dragging")) return; // nicht mitten im Einlesen oder Ziehen
     if (kind === "course-updated" || kind === "courses" || kind === "ai") draw();
   });
   return page;
+}
+
+/** Eine Zeile je PDF im Fortschritt; Fehler bleiben rot stehen, bis zum nächsten Einlesen. */
+function progressRow(name) {
+  const line = h("span.muted.num", "Wird geöffnet …");
+  const bar = h("i", { style: { "--p": "0" } });
+  status.append(h("div.card", h("b", { style: { "overflow-wrap": "anywhere" } }, name), line, h("div.bar", bar)));
+  return {
+    progress: (text, p) => {
+      line.textContent = text;
+      bar.style.setProperty("--p", String(p));
+    },
+    done: (text) => {
+      line.textContent = text;
+      bar.style.setProperty("--p", "1");
+    },
+    failed: (e) => {
+      line.textContent = `Nicht eingelesen: ${message(e)}`;
+      line.style.color = "var(--wrong)";
+      line.setAttribute("role", "alert");
+    },
+  };
+}
+
+const importedText = (r) =>
+  `${r.units} ${r.units === 1 ? "Einheit wird" : "Einheiten werden"} vorbereitet${r.figures ? `, ${r.figures} ${r.figures === 1 ? "Grafik" : "Grafiken"} zum Beschriften` : ""}.${skippedNote(r)}`;
+
+/**
+ * PDFs einlesen. Ein neuer Kurs entsteht erst, wenn das erste PDF Text hat; klappt keins, wird er wieder entfernt.
+ * Am Ende sagt die App ehrlich, wie viele PDFs eingelesen wurden.
+ */
+async function importPdfs(files, target) {
+  status.replaceChildren();
+  importing = true;
+  let courseId = target.id ?? null;
+  let created = false;
+  let ok = 0;
+  try {
+    for (const file of files) {
+      const row = progressRow(file.name);
+      try {
+        const { pages, figures } = await readPdf(file, (n, of, figs) =>
+          row.progress(`Seite ${n} von ${of} gelesen${figs ? ` · ${figs} ${figs === 1 ? "Grafik" : "Grafiken"} gefunden` : ""}`, n / of),
+        );
+        if (courseId == null) {
+          courseId = await call("create_course", { name: target.name, examDate: target.examDate });
+          created = true;
+        }
+        row.done(importedText(await call("import_document", { courseId, name: file.name, pages, figures })));
+        ok++;
+      } catch (e) {
+        row.failed(e);
+        fail(e);
+      }
+    }
+    if (created && !ok) await call("delete_course", { id: courseId }).catch(fail);
+  } finally {
+    importing = false;
+  }
+  await loadCourses().catch(fail);
+  if (ok) selectCourse(courseId);
+  emit("courses");
+  if (ok === files.length) toast(`${ok === 1 ? "Eingelesen" : `Alle ${ok} PDFs eingelesen`}. Die ersten Lektionen erscheinen gleich im Lernpfad.`);
+  else if (ok) toast(`${ok} von ${files.length} PDFs eingelesen. Was nicht geklappt hat, steht oben in Rot.`, { error: true });
 }
 
 function content(page) {
   // PDFs nur in eigene Kurse; geteilte Kurse gehören dem, der sie angelegt hat.
   const courses = state.courses.filter((c) => c.mine);
   const selected = currentCourse()?.mine ? currentCourse() : courses[0];
-  const status = h("div.stack", { role: "status", "aria-live": "polite" });
 
   const newName = h("input.input", { id: "course-name", required: true, autocomplete: "off", placeholder: "z. B. Mikroökonomie" });
   const newDate = h("input.input", { id: "course-date", type: "date" });
@@ -262,43 +342,25 @@ function content(page) {
   });
   input.addEventListener("change", () => importFiles(Array.from(input.files)));
 
-  async function targetCourse() {
-    if (pick && pick.value !== "new") return Number(pick.value);
+  /** Gewählter Kurs ({ id }) oder Angaben für einen neuen ({ name, examDate }). null, solange der Name fehlt. */
+  function targetCourse() {
+    if (pick && pick.value !== "new") return { id: Number(pick.value) };
     const name = newName.value.trim();
     if (!name) {
       newName.focus();
       status.replaceChildren(h("p", { role: "alert", style: { color: "var(--wrong)", "font-weight": "600" } }, "Gib dem Kurs zuerst einen Namen."));
       return null;
     }
-    return call("create_course", { name, examDate: newDate.value || null });
+    return { name, examDate: newDate.value || null };
   }
 
-  async function importFiles(files) {
+  function importFiles(files) {
     const pdfs = files.filter((f) => /\.pdf$/i.test(f.name) || f.type === "application/pdf");
     input.value = "";
-    if (!pdfs.length) return;
-    const courseId = await targetCourse();
-    if (courseId == null) return;
-    for (const file of pdfs) {
-      const line = h("span.muted.num", "Wird geöffnet …");
-      const bar = h("i", { style: { "--p": "0" } });
-      status.append(h("div.card", h("b", { style: { "overflow-wrap": "anywhere" } }, file.name), line, h("div.bar", bar)));
-      try {
-        const { pages, figures } = await readPdf(file, (n, of, figs) => {
-          line.textContent = `Seite ${n} von ${of} gelesen${figs ? ` · ${figs} ${figs === 1 ? "Grafik" : "Grafiken"} gefunden` : ""}`;
-          bar.style.setProperty("--p", String(n / of));
-        });
-        const res = await call("import_document", { courseId, name: file.name, pages, figures });
-        line.textContent = `${res.units} ${res.units === 1 ? "Einheit wird" : "Einheiten werden"} vorbereitet${res.figures ? `, ${res.figures} ${res.figures === 1 ? "Grafik" : "Grafiken"} zum Beschriften` : ""}.${skippedNote(res)}`;
-      } catch (e) {
-        line.textContent = String(e?.message || e);
-        line.style.color = "var(--wrong)";
-      }
-    }
-    await loadCourses();
-    selectCourse(courseId);
-    emit("courses");
-    toast("Fertig eingelesen. Die ersten Lektionen erscheinen gleich im Lernpfad.");
+    if (importing) return toast("Es wird gerade schon eingelesen. Warte kurz, bis es fertig ist.");
+    if (!pdfs.length) return toast("Das ist kein PDF. Wähle eine PDF-Datei aus.", { error: true });
+    const target = targetCourse();
+    if (target) importPdfs(pdfs, target).catch(fail);
   }
 
   return [
@@ -566,11 +628,16 @@ const SHARE_HINT = {
  * Prüfungsschwerpunkte: eigener Text (Stoffplan, Lernziele, Altklausur), aus einem PDF übernehmen
  * oder Vorschläge der KI aus den Orga-Folien antippen. Nichts wird automatisch gesetzt.
  */
+const MAX_FOCUS = 4000; // wie der Kern (api::exam_focus)
+
 function focusField(c) {
-  const area = h("textarea.input", { id: "edit-focus", rows: 5, maxlength: 4000, value: c.exam_focus || "", placeholder: "z. B.\nMarktformen\nPreisbildung im Monopol\nElastizität der Nachfrage" });
+  const area = h("textarea.input", { id: "edit-focus", rows: 5, maxlength: MAX_FOCUS, value: c.exam_focus || "", placeholder: "z. B.\nMarktformen\nPreisbildung im Monopol\nElastizität der Nachfrage" });
+  /** Text anhängen; gibt zurück, ob dabei etwas abgeschnitten wurde. */
   const add = (text) => {
     const cur = area.value.trim();
-    area.value = (cur ? `${cur}\n${text.trim()}` : text.trim()).slice(0, 4000);
+    const all = cur ? `${cur}\n${text.trim()}` : text.trim();
+    area.value = all.slice(0, MAX_FOCUS);
+    return all.length > MAX_FOCUS;
   };
   const file = h("input", { type: "file", accept: "application/pdf,.pdf", hidden: true });
   const fromPdf = h("button.btn.ghost", { type: "button", onclick: () => file.click() }, icon("file-pdf"), "Aus PDF übernehmen");
@@ -583,8 +650,8 @@ function focusField(c) {
       const { pages } = await readPdf(f, () => {}, { withFigures: false });
       const text = pages.map((p) => p.split("\n").map((l) => l.trim()).filter(Boolean).join("\n")).join("\n").trim();
       if (!text) throw "In diesem PDF wurde kein Text gefunden. Ist es eingescannt?";
-      add(text);
-      toast(text.length > 4000 ? "Übernommen, aber gekürzt: Es passen 4000 Zeichen. Streich am besten, was nicht drankommt." : "Übernommen. Streich, was nicht drankommt.");
+      const cut = add(text);
+      toast(cut ? `Übernommen, aber gekürzt: Es passen ${MAX_FOCUS} Zeichen. Streich am besten, was nicht drankommt.` : "Übernommen. Streich, was nicht drankommt.");
     } catch (e) {
       fail(e);
     }
@@ -594,7 +661,7 @@ function focusField(c) {
     const chip = h("button.hint-chip", { type: "button", "aria-pressed": "false" }, icon("plus-circle"), h("span", x));
     chip.addEventListener("click", () => {
       if (chip.getAttribute("aria-pressed") === "true") return;
-      add(x);
+      if (add(x)) toast(`Gekürzt: Es passen ${MAX_FOCUS} Zeichen.`, { error: true });
       chip.setAttribute("aria-pressed", "true");
       chip.querySelector("use").setAttribute("href", "#i-check");
     });
