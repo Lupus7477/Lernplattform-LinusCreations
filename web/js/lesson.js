@@ -115,7 +115,13 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
       chips.forEach((c) => c.setAttribute("aria-pressed", String(c === sel)));
       zones.forEach((z, zi) => z.el.classList.toggle("is-picked", zi === selZone));
     };
-    const changed = () => setReady(ready(zones.map((_, zi) => inZone(zi).length), inZone(null).length));
+    // Kleine Auswahl klebt unten am Bildschirm (Felder scrollen darüber); eine große würde alles verdecken.
+    const dock = () => bank.classList.toggle("dock", bank.offsetHeight <= body.clientHeight * 0.4);
+    const changed = () => {
+      setReady(ready(zones.map((_, zi) => inZone(zi).length), inZone(null).length));
+      dock();
+    };
+    requestAnimationFrame(dock);
 
     /** Begriff an seinen Platz: Zone zi oder zurück in die Auswahl (an seine alte Stelle). */
     function move(c, zi) {
@@ -178,8 +184,9 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
         const clip = el.closest(".figure-wrap.zoomed");
         return !clip || inside(clip);
       };
+      if (inside(bank)) return "bank"; // die Auswahl klebt unten und liegt dann über den Feldern
       const zi = zones.findIndex((z) => inside(z.el) && visible(z.el));
-      return zi >= 0 ? zi : inside(bank) ? "bank" : -1;
+      return zi >= 0 ? zi : -1;
     };
     chips.forEach((c) =>
       c.addEventListener("pointerdown", (e) => {
@@ -350,27 +357,43 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
     const img = h("img", { alt: "Grafik zum Beschriften", draggable: "false" });
     const stage = h("div.figure", img);
     const zones = ex.spots.map(([x, y, w, hh], i) => {
-      // Mittelpunkt auf die Beschriftung, Mindestgröße per CSS: lesbar auch bei kleinen Stellen am Handy
-      const el = h("div.spot", { style: { left: `${(x + w / 2) * 100}%`, top: `${(y + hh / 2) * 100}%`, width: `${w * 100}%`, height: `${hh * 100}%` }, role: "group", "aria-label": `Stelle ${i + 1}` }, h("span.spot-num", String(i + 1)));
+      // Mindestens so groß wie die Beschriftung im Bild, sonst so groß wie der eingesetzte Begriff: wächst nach rechts,
+      // höchstens bis zur nächsten Stelle derselben Zeile bzw. zum Bildrand. Was länger ist, bricht um – abgeschnitten wird nie.
+      const cy = y + hh / 2;
+      const next = Math.min(1, ...ex.spots.filter(([x2, y2, , h2]) => x2 > x && Math.abs(y2 + h2 / 2 - cy) < Math.max(hh, h2, 0.06)).map(([x2]) => x2 - 0.01));
+      const el = h("div.spot", { style: { left: `${x * 100}%`, top: `${cy * 100}%`, "--w": `${w * 100}%`, "--h": `${hh * 100}%`, "--max": `${(next - x) * 100}%`, "--hh": String(hh) }, role: "group", "aria-label": `Stelle ${i + 1}` }, h("span.spot-num", String(i + 1)));
       stage.append(el);
       return { el, list: el, name: `Stelle ${i + 1}`, cap: 1 };
     });
-    // Liegen Stellen in einer Zeile zu dicht (z. B. Länder auf einer Karte), startet das Bild vergrößert:
-    // Mittelpunkte sollen mindestens 56 px auseinander liegen.
-    // ponytail: „gleiche Zeile“ = Mittelpunkte < 6 % der Höhe auseinander; genügt für Folien.
-    let dx = 1;
-    ex.spots.forEach(([x1, y1, w1, h1], i) =>
-      ex.spots.slice(i + 1).forEach(([x2, y2, w2, h2]) => {
-        if (Math.abs(y1 + h1 / 2 - (y2 + h2 / 2)) < 0.06) dx = Math.min(dx, Math.abs(x1 + w1 / 2 - (x2 + w2 / 2)));
-      }),
-    );
-    const zoom = zoomable(stage, img, { start: (base) => 56 / Math.max(dx, 0.01) / base });
+    // Start-Zoom: eingesetzte Begriffe sollen sich nicht überdecken. Schrift = 55 % der Beschriftungshöhe, mindestens 11,2 px;
+    // bei Mindestschrift ist ein Begriff so breit wie seine Beschriftung, hochgerechnet auf 11,2 px. Nachbarn brauchen
+    // Platz nebeneinander oder untereinander (28 px Höhe + Luft), was eben weniger Zoom kostet. Höchstens 3×, damit der Überblick bleibt.
+    // ponytail: Schätzung aus den Beschriftungsfeldern; wer mehr Platz braucht, zoomt selbst weiter.
+    const start = (base) => {
+      const ar = img.naturalHeight / img.naturalWidth;
+      const chip = (w, hh) => Math.max(48, (w * 11.2) / (0.55 * hh * ar));
+      let need = 0;
+      ex.spots.forEach(([x1, y1, w1, h1], i) =>
+        ex.spots.slice(i + 1).forEach(([x2, y2, w2, h2]) => {
+          const dx = Math.abs(x1 + w1 / 2 - (x2 + w2 / 2));
+          const dy = Math.abs(y1 + h1 / 2 - (y2 + h2 / 2));
+          const beside = dx ? ((chip(w1, h1) + chip(w2, h2)) / 2 + 8) / dx : Infinity;
+          const below = dy ? 32 / (dy * ar) : Infinity;
+          need = Math.max(need, Math.min(beside, below));
+        }),
+      );
+      return Math.min(3, need / base) || 1;
+    };
+    const zoom = zoomable(stage, img, { fill: true, start });
+    img.addEventListener("load", () => stage.style.setProperty("--ar", String(img.naturalHeight / img.naturalWidth)));
     img.src = ex.image;
     const bank = h("div.bank");
     const pl = placer({ options: ex.options, zones, bank, ready: (n) => n.every((x) => x === 1) });
     const words = () => zones.map((_, i) => pl.inZone(i)[0]?.textContent ?? "");
     return {
       el: h("div.stack", zoom.el, bank, pl.live),
+      fit: true, // Bild füllt den freien Platz, Begriffe bleiben darunter sichtbar, auch gezoomt
+      tools: zoom.bar,
       key: pl.key,
       value: () => words(),
       text: () => words().map((w, i) => `${i + 1} ${w || "–"}`).join(" · "),
@@ -435,9 +458,10 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
     const view = { mc: () => choice(ex), true_false: () => choice(ex, true), fill_blank: () => blank(ex), cloze: () => blank(ex), sort: () => board(ex), order: () => chain(ex), label: () => figure(ex) }[ex.kind];
     cur.view = view ? view() : match(ex);
     const label = ex.kind === "sort" && ex.groups.length === 4 ? "Fülle die Matrix" : LABEL[ex.kind];
+    body.classList.toggle("fit", !!cur.view.fit);
     body.replaceChildren(
       ...[
-        h("p.q-kind", ex.retry ? `Nochmal: ${label}` : ex.refresh ? `Auffrischen: ${label}` : label),
+        h("div.q-head", h("p.q-kind", ex.retry ? `Nochmal: ${label}` : ex.refresh ? `Auffrischen: ${label}` : label), cur.view.tools),
         ["fill_blank", "cloze", "match"].includes(ex.kind) ? null : h("h1.q-prompt", ex.prompt),
         cur.view.el,
       ].filter(Boolean),
@@ -513,6 +537,8 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
     requestAnimationFrame(() => {
       fb.classList.add("open");
       nextBtn.focus({ preventScroll: true });
+      // Was die Leiste über der Prüfen-Zeile verdeckt, rückt per Innenabstand frei (gezoomte Grafik passt sich ein).
+      root.style.setProperty("--cover", `${Math.max(0, fb.offsetHeight - foot.offsetHeight)}px`);
     });
   }
 
@@ -523,6 +549,8 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
 
   function advance() {
     fb.classList.remove("open");
+    root.style.setProperty("--cover", "0px");
+    body.classList.remove("fit");
     if (!queue.length) return total ? finish() : exit();
     cur = { ex: queue.shift() };
     show();

@@ -52,6 +52,7 @@ function swotImage() {
 }
 const SWOT_SPOTS = [0, 1, 2, 3].map((i) => ({ x: (30 + (i % 2) * 430 + 20) / 900, y: (30 + Math.floor(i / 2) * 280 + 20) / 600, w: 200 / 900, h: 50 / 600, label: ["Stärken", "Schwächen", "Chancen", "Risiken"][i] }));
 
+const firstIdx = (d) => Math.min(...db.units.filter((u) => u.document_id === d.id).map((u) => u.idx));
 const db = {
   goal: 20,
   courses: q.has("empty")
@@ -280,7 +281,10 @@ const handlers = {
         wrong,
         units: us.length,
         ready: us.filter((u) => u.status === "ready").length,
-        documents: db.documents.filter((d) => d.course_id === c.id).map((d) => ({ id: d.id, name: d.name })),
+        documents: db.documents
+          .filter((d) => d.course_id === c.id)
+          .sort((a, b) => firstIdx(a) - firstIdx(b))
+          .map((d) => ({ id: d.id, name: d.name })),
       };
     }),
   create_course: ({ name, examDate }) => {
@@ -321,6 +325,13 @@ const handlers = {
     const changed = db.units.filter((u) => u.document_id === documentId).length;
     return { units: 0, same: 0, changed, removed: 0, figures: storeFigures(documentId, figures), skipped: 0 };
   },
+  reorder_documents: ({ courseId, documentIds }) => {
+    const rank = (u) => (documentIds.includes(u.document_id) ? documentIds.indexOf(u.document_id) : 1e9);
+    db.units
+      .filter((u) => u.course_id === courseId)
+      .sort((a, b) => rank(a) - rank(b) || a.idx - b.idx)
+      .forEach((u, i) => (u.idx = i));
+  },
   delete_document: ({ documentId }) => {
     const gone = new Set(db.units.filter((u) => u.document_id === documentId).map((u) => u.id));
     db.questions = db.questions.filter((x) => !gone.has(x.unit_id));
@@ -332,6 +343,7 @@ const handlers = {
   course_path: ({ courseId }) =>
     db.units
       .filter((u) => u.course_id === courseId)
+      .sort((a, b) => a.idx - b.idx)
       .map((u) => {
         const qs = visible().filter((x) => x.unit_id === u.id);
         return {

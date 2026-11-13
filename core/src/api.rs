@@ -124,6 +124,21 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
             doc_owner(&conn, who, document_id)?;
             ok(conn.execute("DELETE FROM documents WHERE id = ?1", [document_id]).map_err(err)?)
         }
+        // Reihenfolge der PDFs im Lernpfad: Einheiten eines PDFs bleiben zusammen und behalten ihre Folge.
+        "reorder_documents" => {
+            let (course_id, document_ids) = args!(v, { course_id: i64, document_ids: Vec<i64> });
+            let conn = c.db.lock().unwrap();
+            owner(role(&conn, who, course_id)?)?;
+            let order = serde_json::to_string(&document_ids).map_err(err)?;
+            ok(conn
+                .execute(
+                    // UPDATE … FROM rechnet die neue Folge einmal vorab, nicht je Zeile auf halb geänderten Daten.
+                    "UPDATE units SET idx = o.n FROM (SELECT u.id, ROW_NUMBER() OVER (ORDER BY COALESCE(j.key, 1e9), u.idx) - 1 AS n
+                       FROM units u LEFT JOIN json_each(?2) j ON j.value = u.document_id WHERE u.course_id = ?1) o WHERE o.id = units.id",
+                    params![course_id, order],
+                )
+                .map_err(err)?)
+        }
         "figure" => {
             let figure_id = args!(v, { figure_id: i64 });
             let conn = c.db.lock().unwrap();
@@ -388,7 +403,7 @@ fn courses(c: &Core, who: &Who) -> R<Vec<Course>> {
             "SELECT c.id, c.name, c.exam_date,
                (SELECT COUNT(*) FROM units u WHERE u.course_id = c.id),
                (SELECT COUNT(*) FROM units u WHERE u.course_id = c.id AND u.status = 'ready'),
-               (SELECT json_group_array(json_object('id', d.id, 'name', d.name)) FROM (SELECT id, name FROM documents WHERE course_id = c.id ORDER BY id) d),
+               (SELECT json_group_array(json_object('id', d.id, 'name', d.name)) FROM (SELECT id, name FROM documents WHERE course_id = c.id ORDER BY (SELECT MIN(idx) FROM units WHERE document_id = documents.id), id) d),
                c.owner_id = ?1, c.shared, COALESCE(o.name, ''),
                (SELECT COUNT(*) FROM course_members m WHERE m.course_id = c.id), c.members_invite,
                (SELECT COUNT(*) FROM progress p JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id
@@ -1276,11 +1291,36 @@ mod tests {
             ("start_lesson", serde_json::json!({ "wrongCourse": course })),
             ("share_people", serde_json::json!({ "courseId": course })),
             ("invite_to_course", serde_json::json!({ "courseId": course, "userIds": [2] })),
+            ("reorder_documents", serde_json::json!({ "courseId": course, "documentIds": [20] })),
         ] {
             assert_eq!(run(&c, &U2, cmd, v).unwrap_err(), DENIED, "{cmd}");
         }
         assert_eq!(run(&c, &U2, "courses", Value::Null).unwrap(), serde_json::json!([]));
         assert_eq!(run(&c, &U2, "ai_set_tier", serde_json::json!({ "tier": "kompakt" })).unwrap_err(), DENIED);
+    }
+
+    #[test]
+    fn reorder_documents() {
+        let dir = tmp("reorder");
+        let c = core(&dir);
+        let (course, _, _, _) = seed(&c);
+        c.db.lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO documents(id, course_id, name, pages, created_at) VALUES(21, 10, 'b.pdf', 2, 0), (22, 10, 'c.pdf', 1, 0);
+                 INSERT INTO units(id, course_id, document_id, idx, page_from, page_to, title, source_text) VALUES
+                   (31, 10, 20, 1, 4, 4, 'A2', 'x'), (32, 10, 21, 2, 1, 1, 'B1', 'x'), (33, 10, 21, 3, 2, 2, 'B2', 'x'), (34, 10, 22, 4, 1, 1, 'C1', 'x');",
+            )
+            .unwrap();
+        // c.pdf fehlt in der Liste → bleibt hinten; innerhalb eines PDFs bleibt die Folge
+        run(&c, &crate::LOCAL, "reorder_documents", serde_json::json!({ "courseId": course, "documentIds": [21, 20] })).unwrap();
+        let path = run(&c, &crate::LOCAL, "course_path", serde_json::json!({ "courseId": course })).unwrap();
+        let titles: Vec<&str> = path.as_array().unwrap().iter().map(|u| u["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, ["B1", "B2", "Nachfrage", "A2", "C1"]);
+        let idx: Vec<i64> = path.as_array().unwrap().iter().map(|u| u["idx"].as_i64().unwrap()).collect();
+        assert_eq!(idx, [0, 1, 2, 3, 4]);
+        let docs = &run(&c, &crate::LOCAL, "courses", Value::Null).unwrap()[0]["documents"];
+        assert_eq!(docs.as_array().unwrap().iter().map(|d| d["id"].as_i64().unwrap()).collect::<Vec<_>>(), [21, 20, 22]);
     }
 
     #[test]

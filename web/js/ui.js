@@ -151,23 +151,26 @@ export function flip(els, mutate, ms = 240) {
 /**
  * Bild zum Hineinzoomen: zwei Finger, Strg/⌘ + Mausrad (auch Trackpad-Pinch) oder die Knöpfe −, 100 %, +.
  * Zoom ändert die Breite der Bühne statt `transform`: Stellen rücken auseinander, Begriffe darin bleiben gleich groß.
- * Zoom 1 = eingepasst in die Breite und in `maxH` der Fensterhöhe. `start(grundbreite)` → Zoom nach dem Laden.
+ * Zoom 1 = eingepasst in die Breite und in `maxH` der Fensterhöhe, mit `fill` in die Höhe, die das Layout dem Rahmen gibt.
+ * `start(grundbreite)` → Zoom nach dem Laden. `bar` (−, 100 %, +) darf der Aufrufer woanders einhängen.
  */
-export function zoomable(stage, img, { maxH = 0.6, start } = {}) {
+export function zoomable(stage, img, { maxH = 0.6, fill = false, start } = {}) {
   const frame = h("div.figure-wrap", stage);
   const minus = h("button.icon-btn", { type: "button", "aria-label": "Verkleinern" }, icon("magnifying-glass-minus"));
   const pct = h("button.zoom-pct.num", { type: "button", "aria-label": "Bild einpassen" }, "100 %");
   const plus = h("button.icon-btn", { type: "button", "aria-label": "Vergrößern" }, icon("magnifying-glass-plus"));
-  const el = h("div.figure-box", { style: { "--fig-max": `${maxH * 100}dvh` } }, frame, h("div.zoom-bar", minus, pct, plus));
+  const bar = h("div.zoom-bar", minus, pct, plus);
+  const el = h("div.figure-box", { style: { "--fig-max": `${maxH * 100}dvh` } }, frame, bar);
   let z = 1;
   let base = 0;
-  let width = 0;
+  let size = "";
   let anim = 0;
 
   const fit = () => {
-    width = frame.clientWidth;
+    size = `${frame.clientWidth}x${fill ? frame.clientHeight : innerHeight}`;
     const ratio = img.naturalWidth / img.naturalHeight || 1;
-    base = Math.max(120, Math.min(width - 28, innerHeight * maxH * ratio)); // 28 = Innenabstand des Rahmens
+    const room = fill ? frame.clientHeight - 28 : innerHeight * maxH; // 28 = Innenabstand des Rahmens
+    base = Math.max(120, Math.min(frame.clientWidth - 28, room * ratio));
   };
   /** Zoom setzen; der Punkt (x, y) im Fenster bleibt dabei unter Finger bzw. Mauszeiger stehen. */
   function set(next, x, y) {
@@ -239,8 +242,12 @@ export function zoomable(stage, img, { maxH = 0.6, start } = {}) {
   };
   img.addEventListener("load", load);
   if (img.complete && img.naturalWidth) requestAnimationFrame(load);
-  new ResizeObserver(() => frame.clientWidth && frame.clientWidth !== width && img.naturalWidth && (fit(), set(z))).observe(frame);
-  return { el, frame, set };
+  // Drehen, Fenstergröße, Feedback-Leiste: neu einpassen, der Zoomfaktor bleibt.
+  new ResizeObserver(() => {
+    const now = `${frame.clientWidth}x${fill ? frame.clientHeight : innerHeight}`;
+    if (frame.clientWidth && now !== size && img.naturalWidth) (fit(), set(z));
+  }).observe(frame);
+  return { el, frame, bar, set };
 }
 
 export function countUp(el, to, ms = 700) {

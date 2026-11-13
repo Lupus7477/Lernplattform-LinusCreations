@@ -1,6 +1,6 @@
 // Hinzufügen: Kurs anlegen, PDF einlesen (pdf.js, läuft in jeder WebView), Fortschritt der Vorbereitung.
 import { call } from "./api.js";
-import { confirmSheet, fmtDate, h, icon, openSheet, segmented, toast } from "./ui.js";
+import { confirmSheet, flip, fmtDate, h, icon, openSheet, segmented, toast } from "./ui.js";
 import { aiNotice, currentCourse, emit, loadCourses, selectCourse, state, subscribe } from "./state.js";
 
 let pdfjs;
@@ -212,6 +212,7 @@ export async function render() {
   const draw = () => page.replaceChildren(...content(page));
   draw();
   page.cleanup = subscribe((kind) => {
+    if (document.querySelector(".doc.is-dragging")) return; // nicht mitten im Ziehen neu zeichnen
     if (kind === "course-updated" || kind === "courses" || kind === "ai") draw();
   });
   return page;
@@ -319,11 +320,14 @@ async function refresh() {
 function courseCard(c) {
   const done = c.ready === c.units;
   const badge = !c.mine ? h("span.badge", `von ${c.owner}`) : c.share_all ? h("span.badge", "Mit allen geteilt") : c.members ? h("span.badge", `Geteilt mit ${c.members}`) : null;
-  // Eigene PDFs: ersetzen (neue Fassung) oder löschen, beides mit Rückfrage
-  const doc = (d) =>
+  // Eigene PDFs: sortieren (ab zwei), ersetzen (neue Fassung) oder löschen, beides mit Rückfrage
+  const n = c.documents.length;
+  const doc = (d, i) =>
     c.mine
       ? h(
           "div.doc",
+          { "data-id": String(d.id) },
+          n > 1 ? h("button.icon-btn.grip", { type: "button", title: "Ziehen oder mit ↑ ↓ verschieben", "aria-label": `„${d.name}“ verschieben, Stelle ${i + 1} von ${n}` }, icon("dots-six-vertical")) : null,
           icon("file-pdf"),
           h("span.name", d.name),
           h("button.icon-btn", { type: "button", title: "Ersetzen", "aria-label": `„${d.name}“ ersetzen`, onclick: () => replaceDoc(d) }, icon("upload-simple")),
@@ -342,10 +346,72 @@ function courseCard(c) {
           : null,
     ),
     c.exam_date ? h("p.muted", `Prüfung am ${fmtDate(c.exam_date)}`) : null,
-    h("div.docs", c.documents.map(doc)),
+    c.mine && n > 1 ? sortable(h("div.docs", c.documents.map(doc)), (ids, id, keyboard) => reorder(c, ids, id, keyboard)) : h("div.docs", c.documents.map(doc)),
+    c.mine && n > 1 ? h("p.hint", "In dieser Reihenfolge kommen die PDFs im Lernpfad.") : null,
     h("div.bar", h("i", { style: { "--p": String(c.units ? c.ready / c.units : 0) } })),
     h("p.muted.num", done ? `Alle ${c.units} Einheiten bereit` : `${c.ready} von ${c.units} Einheiten vorbereitet`),
   );
+}
+
+/**
+ * Zeilen am Griff ziehen (Maus, Finger) oder per Pfeiltaste am Griff verschieben.
+ * Die gezogene Zeile folgt dem Zeiger, die anderen weichen per FLIP aus. done(ids, id, keyboard) nur bei geänderter Folge.
+ */
+function sortable(list, done) {
+  const ids = () => [...list.children].map((r) => Number(r.dataset.id));
+  list.addEventListener("pointerdown", (e) => {
+    const grip = e.target.closest(".grip");
+    if (!grip || e.button > 0) return;
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    const row = grip.closest(".doc");
+    const before = ids().join();
+    const y0 = e.clientY;
+    const top0 = row.offsetTop;
+    row.classList.add("is-dragging");
+    const move = (ev) => {
+      // Layout-Positionen (offsetTop) statt getBoundingClientRect: laufende FLIP-Animationen verfälschen sie nicht.
+      const want = top0 + ev.clientY - y0;
+      const others = [...list.children].filter((r) => r !== row);
+      const next = others.find((r) => r.offsetTop + r.offsetHeight / 2 > want + row.offsetHeight / 2) ?? null;
+      if (row.nextElementSibling !== next) flip(others, () => list.insertBefore(row, next), 200);
+      row.style.transform = `translateY(${want - row.offsetTop}px)`;
+    };
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      grip.removeEventListener("pointercancel", up);
+      flip([row], () => (row.style.transform = ""), 200);
+      row.classList.remove("is-dragging");
+      if (ids().join() !== before) done(ids(), row.dataset.id, false);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+    grip.addEventListener("pointercancel", up);
+  });
+  list.addEventListener("keydown", (e) => {
+    const grip = e.target.closest(".grip");
+    if (!grip || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    e.preventDefault();
+    const row = grip.closest(".doc");
+    const other = e.key === "ArrowUp" ? row.previousElementSibling : row.nextElementSibling;
+    if (!other) return;
+    flip([...list.children], () => (e.key === "ArrowUp" ? other.before(row) : other.after(row)), 200);
+    grip.focus();
+    done(ids(), row.dataset.id, true);
+  });
+  return list;
+}
+
+async function reorder(c, ids, id, keyboard) {
+  try {
+    await call("reorder_documents", { courseId: c.id, documentIds: ids });
+  } catch (e) {
+    fail(e);
+  }
+  await refresh();
+  // Tastatur: Fokus bleibt am Griff, der Screenreader liest die neue Stelle vor
+  if (keyboard) document.querySelector(`.doc[data-id="${id}"] .grip`)?.focus();
 }
 
 /** Neue Fassung eines PDFs: gleiche Abschnitte bleiben samt Fortschritt, bei geänderten prüft die KI die Fragen. */
