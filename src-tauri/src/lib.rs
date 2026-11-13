@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lernpfad_core::{api, db, Core, LOCAL};
+use lernpfad_core::{api, db, report, Core, LOCAL};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
@@ -207,6 +207,8 @@ impl App {
                 self.activate(None);
                 return Ok(Value::Null);
             }
+            // Systemdaten dieses Geräts: nie an den Server weiterreichen, der hängt seine eigenen an.
+            "device_info" => return Ok(report::system_info(&self.core)),
             _ => {}
         }
         let Some(mut r) = self.remote() else {
@@ -299,6 +301,8 @@ async fn rpc_stream(app: State<'_, Arc<App>>, cmd: String, args: Value, on_token
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             let online = Arc::new(AtomicBool::new(false));

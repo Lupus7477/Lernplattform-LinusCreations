@@ -43,4 +43,6 @@
 <symbol id="i-magnifying-glass-plus" viewBox="0 0 256 256"><g fill="none" stroke="currentColor" stroke-width="24" stroke-linecap="round"><circle cx="112" cy="112" r="80"/><path d="M168.57 168.57 224 224M80 112h64M112 80v64"/></g></symbol>
 <symbol id="i-magnifying-glass-minus" viewBox="0 0 256 256"><g fill="none" stroke="currentColor" stroke-width="24" stroke-linecap="round"><circle cx="112" cy="112" r="80"/><path d="M168.57 168.57 224 224M80 112h64"/></g></symbol>
 <symbol id="i-dots-six-vertical" viewBox="0 0 256 256" fill="currentColor"><circle cx="92" cy="60" r="16"/><circle cx="164" cy="60" r="16"/><circle cx="92" cy="128" r="16"/><circle cx="164" cy="128" r="16"/><circle cx="92" cy="196" r="16"/><circle cx="164" cy="196" r="16"/></symbol>
+<symbol id="i-bookmark" viewBox="0 0 256 256" fill="currentColor"><path fill-rule="evenodd" d="M184,28H72A20,20,0,0,0,52,48V224a12,12,0,0,0,18.36,10.18L128,198.15l57.64,36A12,12,0,0,0,204,224V48A20,20,0,0,0,184,28Zm-4,174.35-45.64-28.53a12,12,0,0,0-12.72,0L76,202.35V52H180Z"/></symbol>
+<symbol id="i-bookmark-fill" viewBox="0 0 256 256" fill="currentColor"><path d="M184,28H72A20,20,0,0,0,52,48V224a12,12,0,0,0,18.36,10.18L128,198.15l57.64,36A12,12,0,0,0,204,224V48A20,20,0,0,0,184,28Z"/></symbol>
 </svg>

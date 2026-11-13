@@ -64,6 +64,13 @@ export function applyTheme(mode = pref.get("theme", "system")) {
   else document.documentElement.dataset.theme = mode;
 }
 
+/** Link im System-Browser öffnen (App: Opener-Plugin, Web: neuer Tab). */
+export function openExternal(url) {
+  const opener = window.__TAURI__?.opener;
+  if (opener) return opener.openUrl(url).catch(() => window.open(url, "_blank", "noopener"));
+  window.open(url, "_blank", "noopener");
+}
+
 // ---------- Rückmeldungen ----------
 /** Kurze Meldung. Mit `action` (z. B. „Rückgängig“) bleibt sie länger stehen. */
 export function toast(message, { action, onAction } = {}) {

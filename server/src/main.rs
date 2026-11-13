@@ -6,8 +6,9 @@ mod auth;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, Path, Request, State};
@@ -19,7 +20,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_server::tls_rustls::RustlsConfig;
 use futures_util::stream;
-use lernpfad_core::{api, db, Core, Who};
+use lernpfad_core::{api, db, report, Core, Who};
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -56,7 +57,13 @@ struct Srv {
     pin: Option<String>,
     /// Das selbst erzeugte Zertifikat (öffentlich): Apps holen es einmal und prüfen es gegen `pin`
     cert_pem: Option<String>,
+    /// Fehler melden: GitHub-Token (fine-grained, nur Issues dieses Repos) aus `LERNPFAD_GITHUB_TOKEN`
+    github_token: Option<String>,
+    /// Gesendete Meldungen je Konto (für das Limit pro Stunde)
+    reports: Mutex<HashMap<i64, Vec<Instant>>>,
 }
+
+const REPORTS_PER_HOUR: usize = 5;
 
 #[derive(Clone)]
 struct Ev {
@@ -170,6 +177,11 @@ async fn run() -> Result<(), String> {
         println!("\nNoch kein Konto. Einrichten (einmalig, nur mit diesem Link):\n  {base}/#/setup/{t}\n");
     }
 
+    let github_token = std::env::var("LERNPFAD_GITHUB_TOKEN").ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    println!(
+        "Fehler melden: {}",
+        if github_token.is_some() { format!("Issues gehen an github.com/{}", report::REPO) } else { "ohne LERNPFAD_GITHUB_TOKEN öffnet die App ein vorausgefülltes Issue im Browser".into() }
+    );
     let srv = Arc::new(Srv {
         core: Arc::new(core),
         events,
@@ -181,6 +193,8 @@ async fn run() -> Result<(), String> {
         hsts,
         pin,
         cert_pem,
+        github_token,
+        reports: Mutex::new(HashMap::new()),
     });
     let app = Router::new()
         .route("/api/rpc/{cmd}", post(rpc))
@@ -354,7 +368,8 @@ async fn rpc(State(s): State<Arc<Srv>>, ConnectInfo(peer): ConnectInfo<SocketAdd
     if cmd == "session" {
         let user = current(&s, &h).await.map(|(x, _)| json!({ "name": x.name, "admin": x.admin }));
         let setup = s.setup_token.lock().unwrap().is_some();
-        return Json(json!({ "mode": "server", "user": user, "setup": setup })).into_response();
+        let report = user.is_some() && s.github_token.is_some();
+        return Json(json!({ "mode": "server", "user": user, "setup": setup, "report": report })).into_response();
     }
     if public {
         return sign_in(&s, &cmd, args, ip, &h).await;
@@ -362,14 +377,54 @@ async fn rpc(State(s): State<Arc<Srv>>, ConnectInfo(peer): ConnectInfo<SocketAdd
     let (sess, _) = sess.unwrap();
     let who = Who { id: sess.user_id, admin: sess.admin };
     match cmd.as_str() {
-        "logout" | "change_password" | "sessions_list" | "session_revoke" | "sessions_revoke_others" | "members" | "member_disable" | "invite_create"
-        | "connect_link" => account(&s, &cmd, args, sess, ip, &h, &uri).await,
+        "logout" | "change_password" | "delete_account" | "sessions_list" | "session_revoke" | "sessions_revoke_others" | "members" | "member_disable"
+        | "invite_create" | "connect_link" => account(&s, &cmd, args, sess, ip, &h, &uri).await,
+        "draft_issue" | "report_issue" => issue(&s, who, &cmd, args).await,
         "explain" | "ask" => stream_call(&s, who, cmd, args),
         _ => {
             let core = s.core.clone();
             core_result(blocking(move || api::call(&core, &who, &cmd, args, &mut |_| {})).await)
         }
     }
+}
+
+/// Meldungen: Systemdaten des Servers und die Einschätzung eines Fehlers setzt immer der Server selbst,
+/// der Client kann sie weder weglassen noch vorgeben. `report_issue` legt das Issue auf GitHub an.
+async fn issue(s: &Arc<Srv>, who: Who, cmd: &str, mut args: Value) -> Response {
+    let post = cmd == "report_issue";
+    let token = s.github_token.clone();
+    if post {
+        if token.is_none() {
+            return text(StatusCode::NOT_IMPLEMENTED, "Auf diesem Server ist Fehler melden nicht eingerichtet.");
+        }
+        let now = Instant::now();
+        let mut r = s.reports.lock().unwrap();
+        let sent = r.entry(who.id).or_default();
+        sent.retain(|t| now.duration_since(*t) < Duration::from_secs(3600));
+        if sent.len() >= REPORTS_PER_HOUR {
+            let wait = 3600 - now.duration_since(sent[0]).as_secs().min(3599);
+            let body = Json(json!({ "error": "Du hast in der letzten Stunde schon 5 Meldungen geschickt. Versuch es später noch einmal.", "retry_after": wait }));
+            return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, wait.to_string())], body).into_response();
+        }
+    }
+    let s2 = s.clone();
+    let res = blocking(move || -> Result<Value, String> {
+        if let Some(o) = args.as_object_mut() {
+            o.remove("triage");
+            o.insert("server".into(), report::system_info(&s2.core));
+        }
+        let input: report::Input = serde_json::from_value(args).map_err(|e| e.to_string())?;
+        let d = report::make(&s2.core.ai, input)?;
+        if !post {
+            return serde_json::to_value(d).map_err(|e| e.to_string());
+        }
+        let (number, url) = report::post_issue(token.as_deref().unwrap_or_default(), &d)?;
+        s2.reports.lock().unwrap().entry(who.id).or_default().push(Instant::now());
+        eprintln!("[melden] Issue #{number} angelegt");
+        Ok(json!({ "number": number, "url": url }))
+    })
+    .await;
+    core_result(res)
 }
 
 /// `explain`/`ask`: NDJSON, je Zeile `{"t": Stück}`, zum Schluss `{"ok": Ergebnis}` oder `{"err": Meldung}`.
@@ -546,18 +601,23 @@ async fn account(s: &Arc<Srv>, cmd: &str, args: Value, sess: auth::Session, ip: 
     }
     let base = format!("{}://{}", s.scheme, host(h, uri));
 
-    if cmd == "change_password" {
+    // Passwort ändern und Konto löschen: nur mit dem aktuellen Passwort, mit Sperr-Timer wie beim Anmelden.
+    if cmd == "change_password" || cmd == "delete_account" {
         if let Some(secs) = s.limiter.lock().unwrap().locked(ip, &sess.name, Instant::now()) {
             return locked(secs);
         }
         let Ok(_permit) = s.hashing.acquire().await else { return text(StatusCode::SERVICE_UNAVAILABLE, "") };
         let s2 = s.clone();
         let (uid, sid, name) = (sess.user_id, sess.id, sess.name.clone());
+        let delete = cmd == "delete_account";
         let res = blocking(move || -> Result<(), Fail> {
             let db = &s2.core.db;
             let stored: Option<String> = db.lock().unwrap().query_row("SELECT pw_hash FROM users WHERE id = ?1", [uid], |r| r.get(0)).unwrap_or(None);
             if !auth::verify_password(&a.current, stored.as_deref()) {
                 return Err(Fail::Wrong("Das aktuelle Passwort stimmt nicht."));
+            }
+            if delete {
+                return auth::delete_account(&mut db.lock().unwrap(), uid).map_err(Fail::Invalid);
             }
             auth::check_password(&a.password, &name).map_err(|e| Fail::Invalid(e.into()))?;
             let hash = auth::hash_password(&a.password);
@@ -568,6 +628,10 @@ async fn account(s: &Arc<Srv>, cmd: &str, args: Value, sess: auth::Session, ip: 
         })
         .await;
         return match res {
+            Ok(()) if delete => {
+                eprintln!("[konto] Konto {} gelöscht", sess.user_id);
+                ([(header::SET_COOKIE, format!("{COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"))], Json(Value::Null)).into_response()
+            }
             Ok(()) => {
                 s.limiter.lock().unwrap().success(ip, &sess.name);
                 Json(Value::Null).into_response()

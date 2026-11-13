@@ -16,6 +16,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::data::LlamaTokenData;
 use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 use serde::Serialize;
+use serde_json::{json, Value};
 
 /// Eine Modellstufe. URLs sind auf eine feste Hugging-Face-Revision gepinnt.
 pub struct Tier {
@@ -116,6 +117,9 @@ pub struct Ai {
     last_used: Mutex<Instant>,
     downloading: Mutex<bool>,
     emit: Emit,
+    /// Für Fehlermeldungen: lief das Modell zuletzt auf der GPU, wie schnell war die letzte Antwort (Tokens/s)?
+    on_gpu: Mutex<Option<bool>>,
+    last_speed: Mutex<Option<f32>>,
 }
 
 fn backend() -> &'static LlamaBackend {
@@ -137,6 +141,8 @@ impl Ai {
             last_used: Mutex::new(Instant::now()),
             downloading: Mutex::new(false),
             emit,
+            on_gpu: Mutex::new(None),
+            last_speed: Mutex::new(None),
         });
         let weak = Arc::downgrade(&ai);
         std::thread::spawn(move || loop {
@@ -277,18 +283,54 @@ impl Ai {
                 LlamaModel::load_from_file(backend(), &path, &params)
             };
             // GPU klappt nicht (z.B. kein Vulkan) → CPU
-            let model = load(GPU_LAYERS).or_else(|_| load(0)).map_err(|e| AiError::Failed(e.to_string()))?;
+            let (model, gpu) = match load(GPU_LAYERS) {
+                Ok(m) => (m, GPU_LAYERS > 0),
+                Err(_) => (load(0).map_err(|e| AiError::Failed(e.to_string()))?, false),
+            };
+            *self.on_gpu.lock().unwrap() = Some(gpu);
             *guard = Some(model);
             (self.emit)(&self.status());
         }
         let model = guard.as_ref().unwrap();
         let out = run(model, g, &mut on_token);
         *self.last_used.lock().unwrap() = Instant::now();
-        out
+        out.map(|(text, speed)| {
+            *self.last_speed.lock().unwrap() = Some(speed);
+            text
+        })
+    }
+
+    /// Systemdaten der KI für Fehlermeldungen: Stufe, Zustand, Backend, GPU-Geräte, letzte Geschwindigkeit.
+    pub fn info(&self) -> Value {
+        let s = self.status();
+        let gpu_api = if cfg!(any(target_os = "macos", target_os = "ios")) {
+            "Metal"
+        } else if cfg!(any(target_os = "linux", target_os = "windows")) {
+            "Vulkan"
+        } else {
+            "CPU"
+        };
+        backend(); // Geräteliste braucht das initialisierte Backend
+        let devices: Vec<Value> = llama_cpp_2::list_llama_ggml_backend_devices()
+            .into_iter()
+            .map(|d| json!({ "name": d.description, "backend": d.backend, "vram_mb": d.memory_total / 1_048_576 }))
+            .collect();
+        json!({
+            "tier": s.tier,
+            "state": s.state,
+            "loaded": s.loaded,
+            "backend": gpu_api,
+            "gpu_layers": GPU_LAYERS,
+            "on_gpu": *self.on_gpu.lock().unwrap(),
+            "n_ctx": N_CTX,
+            "last_tokens_per_s": self.last_speed.lock().unwrap().map(|x| (x * 10.0).round() / 10.0),
+            "devices": devices,
+        })
     }
 }
 
-fn run(model: &LlamaModel, g: Gen, on_token: &mut dyn FnMut(&str)) -> Result<String, AiError> {
+/// Erzeugt den Text; gibt ihn mit der Geschwindigkeit (erzeugte Tokens/s) zurück.
+fn run(model: &LlamaModel, g: Gen, on_token: &mut dyn FnMut(&str)) -> Result<(String, f32), AiError> {
     let fail = |e: &dyn std::fmt::Display| AiError::Failed(e.to_string());
 
     let template = model
@@ -394,8 +436,9 @@ fn run(model: &LlamaModel, g: Gen, on_token: &mut dyn FnMut(&str)) -> Result<Str
         ctx.decode(&mut batch).map_err(|e| fail(&e))?;
     }
     let secs = started.elapsed().as_secs_f32();
-    eprintln!("[ki] {} Tokens Eingabe, {produced} erzeugt in {secs:.1} s ({:.0} Tokens/s)", tokens.len(), produced as f32 / secs.max(0.01));
-    Ok(strip_think(&out))
+    let speed = produced as f32 / secs.max(0.01);
+    eprintln!("[ki] {} Tokens Eingabe, {produced} erzeugt in {secs:.1} s ({speed:.0} Tokens/s)", tokens.len());
+    Ok((strip_think(&out), speed))
 }
 
 fn seed() -> u32 {

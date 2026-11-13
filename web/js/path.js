@@ -1,7 +1,8 @@
 // Lernen: der Lernpfad eines Kurses.
 import { call } from "./api.js";
-import { daysUntil, docName, fmtDate, h, icon, openSheet } from "./ui.js";
+import { daysUntil, docName, fmtDate, h, icon, openSheet, toast } from "./ui.js";
 import { aiNotice, currentCourse, subscribe } from "./state.js";
+import { fail } from "./report.js";
 
 export async function render() {
   const page = h("div.page");
@@ -29,8 +30,8 @@ async function content() {
   }
 
   const units = await call("course_path", { courseId: course.id });
-  const pending = units.filter((u) => u.status !== "ready").length;
-  const open = units.filter((u) => u.lessons === 0).length;
+  const pending = units.filter((u) => u.status === "pending").length;
+  const open = units.filter((u) => u.status !== "orga" && u.lessons === 0).length;
 
   const head = h("div.course-head", h("h1", course.name));
   if (course.exam_date) {
@@ -41,13 +42,17 @@ async function content() {
     head.append(h("p.exam", icon("calendar-blank"), `Prüfung am ${fmtDate(course.exam_date)}${when}`), h("p.muted", plan));
   }
   if (pending > 0) {
-    head.append(h("p.muted", { role: "status" }, `Die KI bereitet noch ${pending} von ${units.length} Einheiten vor. Du kannst schon loslegen.`));
+    head.append(h("p.muted", { role: "status" }, `Die KI bereitet noch ${pending} von ${units.filter((u) => u.status !== "orga").length} Einheiten vor. Du kannst schon loslegen.`));
+  }
+  // Prüfungstraining: Fragen aus prüfungsrelevanten Einheiten und gemerkte
+  if (course.exam > 0) {
+    head.append(h("a.btn.secondary", { href: `#/lesson/exam-${course.id}` }, icon("target"), `Prüfungsthemen üben (${course.exam})`));
   }
 
-  return [aiNotice(), head, pathOf(units)].filter(Boolean);
+  return [aiNotice(), head, pathOf(units, course)].filter(Boolean);
 }
 
-function pathOf(units) {
+function pathOf(units, course) {
   const path = h("div.path");
   const next = units.find((u) => u.status === "ready" && u.lessons === 0);
   let doc = null;
@@ -59,9 +64,42 @@ function pathOf(units) {
       const count = units.filter((x) => x.document_id === doc).length;
       path.append(h("div.doc-banner", h("b", docName(u.document)), h("span", `${count} ${count === 1 ? "Einheit" : "Einheiten"}`)));
     }
-    path.append(node(u, u === next, i++));
+    // Nur Organisatorisches: kein Knoten im Weg, nur eine leise Zeile zum Zurückholen
+    if (u.status === "orga") path.append(orgaRow(u, course));
+    else path.append(node(u, u === next, i++));
   }
   return path;
+}
+
+function orgaRow(u, course) {
+  return h(
+    "button.path-skip",
+    { type: "button", onclick: () => orgaSheet(u, course) },
+    icon("eye-slash"),
+    h("span", "Nur Organisatorisches · übersprungen"),
+  );
+}
+
+function orgaSheet(u, course) {
+  const include = course.mine ? h("button.btn.secondary.block", { type: "button" }, "Doch lernen") : null;
+  const s = openSheet({
+    title: "Organisatorisches übersprungen",
+    body: [
+      h("p", "Hier ging es laut KI nur um Organisatorisches wie Termine, Klausur, Kontakt oder Literatur. Daraus entstehen keine Fragen."),
+      u.summary ? h("p.muted", u.summary) : null,
+      course.mine ? null : h("p.hint", "Nur wer den Kurs angelegt hat, kann das ändern."),
+    ],
+    foot: include,
+  });
+  include?.addEventListener("click", async () => {
+    try {
+      await call("include_orga", { unitId: u.id });
+    } catch (e) {
+      return fail(e);
+    }
+    s.close();
+    toast("Die KI bereitet den Abschnitt jetzt als Lerninhalt vor.");
+  });
 }
 
 function node(u, isNext, i) {
@@ -78,9 +116,10 @@ function node(u, isNext, i) {
     isNext ? h("span.node-start", { "aria-hidden": "true" }, "Start") : null,
     h(
       `button.node${kind ? "." + kind : ""}`,
-      { type: "button", disabled: !ready, "aria-label": `${u.title}${sub ? ", " + sub : ""}`, onclick: () => unitSheet(u) },
+      { type: "button", disabled: !ready, "aria-label": `${u.title}${u.exam ? ", prüfungsrelevant" : ""}${sub ? ", " + sub : ""}`, onclick: () => unitSheet(u) },
       ready && u.questions > 0 ? h("span.node-ring", { style: { "--m": String(Math.min(1, u.mastery / 5)) } }) : null,
       icon(glyph),
+      u.exam ? h("span.node-exam", { title: "Prüfungsrelevant" }, icon("target")) : null,
     ),
     h("span.node-label", u.title),
     sub ? h("span.node-sub", sub) : null,

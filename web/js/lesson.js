@@ -3,6 +3,7 @@ import { call } from "./api.js";
 import { confetti, confirmSheet, countUp, flip, h, icon, openSheet, reduceMotion, shake, sound, toast, zoomable } from "./ui.js";
 import { emit, state, subscribe } from "./state.js";
 import { editQuestion, openChat } from "./unit.js";
+import { fail, openReport } from "./report.js";
 
 const LABEL = {
   mc: "Wähle die richtige Antwort",
@@ -27,18 +28,21 @@ function shuffle(a) {
   return b;
 }
 
-/** Lektion einer Einheit (`unitId`), „Falsche wiederholen“ eines Kurses (`wrongCourse`) oder die tägliche Wiederholung (beides leer). */
-export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
+/**
+ * Lektion einer Einheit (`unitId`), „Falsche wiederholen“ (`wrongCourse`), Prüfungstraining (`examCourse`) eines Kurses
+ * oder die tägliche Wiederholung (alles leer).
+ */
+export function openLesson({ unitId = null, wrongCourse = null, examCourse = null }, onExit) {
   const fill = h("i");
   const progress = h("div.progress", { role: "progressbar", "aria-label": "Fortschritt der Lektion", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": "0" }, fill);
   const combo = h("span.combo.hide", { "aria-live": "polite" });
   const closeBtn = h("button.icon-btn", { type: "button", "aria-label": "Lektion beenden" }, icon("x"));
-  const menuBtn = h("button.icon-btn", { type: "button", "aria-label": "Diese Frage bearbeiten oder ausblenden", hidden: true }, icon("dots-three"));
+  const menuBtn = h("button.icon-btn", { type: "button", "aria-label": "Diese Frage merken, bearbeiten, ausblenden oder melden", hidden: true }, icon("dots-three"));
   const body = h("div.lesson-body", { tabindex: "-1" });
   const mainBtn = h("button.btn", { type: "button", disabled: true }, "Prüfen");
   const foot = h("div.lesson-foot", h("div.inner", mainBtn));
   const fb = h("div.feedback", { "aria-live": "assertive" });
-  const root = h("div.lesson", { role: "dialog", "aria-modal": "true", "aria-label": unitId ? "Lektion" : "Wiederholung" }, h("div.lesson-top", closeBtn, progress, combo, menuBtn), body, foot, fb);
+  const root = h("div.lesson", { role: "dialog", "aria-modal": "true", "aria-label": unitId ? "Lektion" : examCourse ? "Prüfungstraining" : "Wiederholung" }, h("div.lesson-top", closeBtn, progress, combo, menuBtn), body, foot, fb);
   document.body.append(root);
   document.body.style.overflow = "hidden";
 
@@ -492,7 +496,7 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
     } catch (e) {
       phase = "answer";
       setReady(true);
-      toast(String(e));
+      fail(e);
     }
   }
 
@@ -564,14 +568,38 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
     try {
       q = await call("question", { questionId: ex.id });
     } catch (e) {
-      return toast(String(e));
+      return fail(e);
     }
+    const mark = h("button.btn.secondary.block", { type: "button" }, icon(q.marked ? "bookmark-fill" : "bookmark"), q.marked ? "Nicht mehr für die Klausur merken" : "Für die Klausur merken");
     const edit = h("button.btn.secondary.block", { type: "button" }, icon("pencil-simple"), "Frage bearbeiten");
     const hide = h("button.btn.secondary.block", { type: "button" }, icon("eye-slash"), "Frage ausblenden");
+    const report = h("button.btn.ghost", { type: "button" }, icon("warning"), "Fehler in dieser Frage melden");
     const del = q.mine && q.shared ? h("button.btn.ghost", { type: "button", style: { color: "var(--wrong)" } }, icon("trash"), "Für alle löschen") : null;
     const s = openSheet({
       title: "Diese Frage",
-      body: [h("p.muted", "Unklar formuliert oder nicht prüfungsrelevant?"), edit, hide, h("p.hint", "Ausgeblendet kommt sie bei dir in keiner Lektion und Wiederholung mehr vor."), del],
+      body: [
+        mark,
+        h("p.hint", "Gemerkte Fragen übst du gezielt unter Wiederholen → Für die Klausur."),
+        h("p.muted", "Unklar formuliert oder nicht prüfungsrelevant?"),
+        edit,
+        hide,
+        h("p.hint", "Ausgeblendet kommt sie bei dir in keiner Lektion und Wiederholung mehr vor."),
+        report,
+        del,
+      ],
+    });
+    mark.addEventListener("click", async () => {
+      s.close();
+      try {
+        await call("mark_question", { questionId: ex.id, marked: !q.marked });
+      } catch (e) {
+        return fail(e);
+      }
+      toast(q.marked ? "Nicht mehr gemerkt." : "Für die Klausur gemerkt.");
+    });
+    report.addEventListener("click", () => {
+      s.close();
+      openReport({ kind: "bug", question: q });
     });
     edit.addEventListener("click", () => {
       s.close();
@@ -590,10 +618,10 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
       try {
         await call("hide_question", { questionId: ex.id, hidden: true });
       } catch (e) {
-        return toast(String(e));
+        return fail(e);
       }
       drop(ex);
-      toast("Ausgeblendet.", { action: "Rückgängig", onAction: () => call("hide_question", { questionId: ex.id, hidden: false }).catch((e) => toast(String(e))) });
+      toast("Ausgeblendet.", { action: "Rückgängig", onAction: () => call("hide_question", { questionId: ex.id, hidden: false }).catch(fail) });
     });
     del?.addEventListener("click", async () => {
       s.close();
@@ -607,7 +635,7 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
       try {
         await call("delete_question", { questionId: ex.id });
       } catch (e) {
-        return toast(String(e));
+        return fail(e);
       }
       drop(ex);
       toast("Gelöscht.");
@@ -630,7 +658,7 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
     try {
       res = await call("finish_lesson", { unitId, correct: firstRight, total });
     } catch (e) {
-      toast(String(e));
+      fail(e);
       return exit();
     }
     state.stats = res.stats;
@@ -674,7 +702,7 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
     body.replaceChildren(h("div.stack", h("div.skeleton", { style: { width: "40%" } }), h("div.skeleton", { style: { height: "36px" } }), h("div.skeleton", { style: { height: "62px" } }), h("div.skeleton", { style: { height: "62px" } })));
     let res;
     try {
-      res = await call("start_lesson", { unitId, wrongCourse });
+      res = await call("start_lesson", { unitId, wrongCourse, examCourse });
     } catch (e) {
       return message("warning", "Die Lektion konnte nicht starten", String(e));
     }
@@ -687,7 +715,9 @@ export function openLesson({ unitId = null, wrongCourse = null }, onExit) {
     if (!res.exercises.length) {
       return wrongCourse
         ? message("seal-check-fill", "Keine falschen Fragen mehr", "Was du hier richtig hattest, kommt in ein paar Tagen in der Wiederholung zurück.")
-        : message("seal-check-fill", "Gerade ist nichts fällig", "Fragen kommen zur Wiederholung zurück, kurz bevor du sie vergessen würdest.");
+        : examCourse
+          ? message("target", "Noch keine Klausurfragen", "Merke dir Fragen über ⋯ für die Klausur oder trag Prüfungsschwerpunkte im Kurs ein.")
+          : message("seal-check-fill", "Gerade ist nichts fällig", "Fragen kommen zur Wiederholung zurück, kurz bevor du sie vergessen würdest.");
     }
     queue = res.exercises;
     total = queue.length;

@@ -1,4 +1,4 @@
-// Wiederholen: fällige Fragen über alle Kurse, falsche je Kurs gezielt üben, Begriffe durchsuchen.
+// Wiederholen: fällige Fragen über alle Kurse, Klausurfragen und falsche je Kurs gezielt üben, Begriffe durchsuchen.
 import { call } from "./api.js";
 import { h, icon } from "./ui.js";
 import { loadCourses, loadStats, subscribe } from "./state.js";
@@ -49,10 +49,27 @@ export async function render() {
       : h("p.muted", "Keine falschen Fragen. Was du falsch beantwortest, kannst du hier gezielt üben."),
   );
 
+  // Prüfungstraining: Fragen zu den Prüfungsschwerpunkten des Kurses und für die Klausur gemerkte
+  const exam = courses.filter((c) => c.exam > 0);
+  const examCard = h(
+    "div.card",
+    h("h2", "Für die Klausur"),
+    exam.length
+      ? exam.map((c) =>
+          h(
+            "div.wrong-row",
+            h("div", h("b", c.name), h("p.muted.num", c.exam === 1 ? "1 Frage zu Prüfungsthemen" : `${c.exam} Fragen zu Prüfungsthemen`)),
+            h("a.btn.secondary", { href: `#/lesson/exam-${c.id}` }, "Üben"),
+          ),
+        )
+      : h("p.muted", "Merke dir Fragen über ⋯ für die Klausur, oder trag im Kurs die Prüfungsschwerpunkte ein. Dann übst du sie hier gezielt."),
+  );
+
   const page = h(
     "div.page",
     h("h1", "Wiederholen"),
     dueCard,
+    examCard,
     wrongCard,
     h("div.card", h("h2", "Begriffe"), h("div.field", h("label", { for: "term-search" }, "Begriff suchen"), search), results),
   );

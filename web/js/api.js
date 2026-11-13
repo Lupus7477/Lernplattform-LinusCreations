@@ -61,16 +61,24 @@ function tauri(name, payload) {
   });
 }
 
+/** Abgelehnte Befehle melden (für „Fehler melden“: letzte Fehler samt Befehl). */
+function noted(cmd, p) {
+  return p.catch((e) => {
+    dispatchEvent(new CustomEvent("lernpfad:error", { detail: { cmd, message: typeof e === "string" ? e : e?.message || String(e) } }));
+    throw e;
+  });
+}
+
 export function call(cmd, args = {}) {
-  return T() ? tauri("rpc", { cmd, args }) : http(cmd, args);
+  return noted(cmd, T() ? tauri("rpc", { cmd, args }) : http(cmd, args));
 }
 
 /** Befehl mit gestreamter Antwort: `onPiece` bekommt den Text stückweise. */
 export function stream(cmd, args, onPiece) {
-  if (!T()) return http(cmd, args, onPiece);
+  if (!T()) return noted(cmd, http(cmd, args, onPiece));
   const ch = new (T().core.Channel)();
   ch.onmessage = onPiece;
-  return tauri("rpc_stream", { cmd, args, onToken: ch });
+  return noted(cmd, tauri("rpc_stream", { cmd, args, onToken: ch }));
 }
 
 let events;

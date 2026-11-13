@@ -2,6 +2,7 @@
 import { call, stream } from "./api.js";
 import { docName, h, icon, markdown, openSheet, segmented, toast, zoomable } from "./ui.js";
 import { state } from "./state.js";
+import { fail } from "./report.js";
 
 export async function render(id) {
   const u = await call("unit", { unitId: Number(id) });
@@ -23,16 +24,41 @@ export async function render(id) {
       )
     : null;
 
+  const course = state.courses?.find((c) => c.id === u.course_id);
   return h(
     "div.page",
     h("div.row", h("a.icon-btn", { href: "#/learn", "aria-label": "Zurück zum Lernpfad" }, icon("arrow-left"))),
     h("div.unit-head", h("h1", u.title), h("p.muted", `Aus ${docName(u.document)}, Seiten ${u.page_from}-${u.page_to}`)),
+    u.exam.length ? h("p.exam", icon("target"), `Prüfungsrelevant: ${u.exam.join(", ")}`) : null,
     u.summary ? h("p", { style: { "font-size": "1.08rem" } }, u.summary) : null,
+    u.orga ? orgaNote(u, course?.mine) : null,
     h("a.btn.block", { href: `#/lesson/${u.id}` }, "Lektion starten"),
     terms,
     questionList(u.id, !!state.courses?.find((c) => c.id === u.course_id)?.shared),
     explainBox,
     h("button.btn.secondary", { type: "button", onclick: () => openChat(u.id, u.title) }, icon("chat-circle-dots"), "Frag die KI"),
+  );
+}
+
+/** Seiten mit Organisatorischem, die nicht abgefragt werden; der Besitzer kann sie zurückholen. */
+function orgaNote(u, mine) {
+  const n = u.orga;
+  const btn = mine ? h("button.btn.ghost", { type: "button" }, "Doch einbeziehen") : null;
+  btn?.addEventListener("click", async () => {
+    try {
+      await call("include_orga", { unitId: u.id });
+    } catch (e) {
+      return fail(e);
+    }
+    btn.disabled = true;
+    toast("Die KI bereitet den Abschnitt mit allen Seiten neu vor.");
+  });
+  return h(
+    "div.notice",
+    icon("eye-slash"),
+    h("b", `${n} ${n === 1 ? "Seite" : "Seiten"} mit Organisatorischem`),
+    h("span.muted", "Termine, Klausur, Kontakt oder Literatur fragt die App nicht ab."),
+    btn ? h("div.actions", btn) : null,
   );
 }
 
@@ -146,7 +172,17 @@ function questionList(unitId, shared) {
       ...qs.map((q) => {
         const toggle = h("button.btn.ghost", { type: "button" }, icon(q.hidden ? "eye" : "eye-slash"), q.hidden ? "Einblenden" : "Ausblenden");
         toggle.addEventListener("click", async () => {
-          await call("hide_question", { questionId: q.id, hidden: !q.hidden });
+          await call("hide_question", { questionId: q.id, hidden: !q.hidden }).catch(fail);
+          draw();
+        });
+        const mark = h(
+          "button.btn.ghost",
+          { type: "button", "aria-pressed": String(q.marked), "aria-label": q.marked ? "Nicht mehr für die Klausur merken" : "Für die Klausur merken" },
+          icon(q.marked ? "bookmark-fill" : "bookmark"),
+          q.marked ? "Gemerkt" : "Merken",
+        );
+        mark.addEventListener("click", async () => {
+          await call("mark_question", { questionId: q.id, marked: !q.marked }).catch(fail);
           draw();
         });
         return h(
@@ -154,7 +190,7 @@ function questionList(unitId, shared) {
           h("p.q-text", q.prompt),
           q.kind in KIND_LABEL && !["mc", "true_false", "fill_blank"].includes(q.kind) ? h("span.badge", KIND_LABEL[q.kind]) : null,
           h("p.muted", "Richtig: ", h("b", q.answer)),
-          h("div.row", h("button.btn.ghost", { type: "button", onclick: () => editQuestion(q, draw) }, icon("pencil-simple"), "Bearbeiten"), toggle),
+          h("div.row", { style: { "flex-wrap": "wrap" } }, h("button.btn.ghost", { type: "button", onclick: () => editQuestion(q, draw) }, icon("pencil-simple"), "Bearbeiten"), toggle, mark),
         );
       }),
     );
@@ -494,7 +530,7 @@ function figureEditor(q, sameKind) {
   };
   const source = segmented([["pdf", "Aus dem Skript"], ["own", "Eigenes Bild"]], "pdf", (v) => (v === "own" ? file.click() : loadGallery()), "Bildquelle");
   loadGallery();
-  if (figureId) call("figure", { figureId }).then((f) => f && show(f.image)).catch((e) => toast(String(e)));
+  if (figureId) call("figure", { figureId }).then((f) => f && show(f.image)).catch(fail);
 
   return {
     el: h(

@@ -8,6 +8,8 @@ import * as profile from "./profile.js";
 import * as unit from "./unit.js";
 import { openLesson } from "./lesson.js";
 import * as auth from "./auth.js";
+import { appInfo, bootReport } from "./report.js";
+import { syncReminder } from "./remind.js";
 
 const views = { learn: path, review, add, profile, unit };
 const TABS = [
@@ -45,7 +47,8 @@ async function boot() {
   if (state.session.mode === "server" && !state.session.user) return auth.show(state.session);
   addEventListener("lernpfad:logged-out", () => location.reload());
 
-  [state.ai] = await Promise.all([call("ai_status"), loadCourses(), loadStats()]);
+  [state.ai] = await Promise.all([call("ai_status"), loadCourses(), loadStats(), appInfo()]);
+  syncReminder(state.stats);
 
   topbar = h("header.topbar");
   main = h("main", { id: "main", tabindex: "-1" });
@@ -57,8 +60,9 @@ async function boot() {
   );
   document.getElementById("app").replaceChildren(topbar, main, tabs);
   renderTopbar();
-  subscribe((kind) => {
+  subscribe((kind, payload) => {
     if (kind === "stats" || kind === "course-selected" || kind === "courses") renderTopbar();
+    if (kind === "stats") syncReminder(payload); // Tagesziel erreicht → heute keine Erinnerung mehr
   });
 
   on("ai-status", (s) => {
@@ -129,12 +133,13 @@ function parse() {
 async function route() {
   const { name, arg } = parse();
   if (name === "lesson") {
-    // #/lesson/<Einheit>, #/lesson/review (fällige) oder #/lesson/wrong-<Kurs> (falsche eines Kurses)
+    // #/lesson/<Einheit>, #/lesson/review (fällige), #/lesson/wrong-<Kurs> (falsche) oder #/lesson/exam-<Kurs> (Prüfungstraining)
     const wrongCourse = arg?.startsWith("wrong-") ? Number(arg.slice(6)) : null;
-    const base = arg === "review" || wrongCourse ? "review" : "learn";
+    const examCourse = arg?.startsWith("exam-") ? Number(arg.slice(5)) : null;
+    const base = arg === "review" || wrongCourse || examCourse ? "review" : "learn";
     if (mounted.name !== base) await show(base);
     lesson?.close();
-    lesson = openLesson({ unitId: base === "review" ? null : Number(arg), wrongCourse }, () => {
+    lesson = openLesson({ unitId: base === "review" ? null : Number(arg), wrongCourse, examCourse }, () => {
       lesson = null;
       location.replace(`#/${base}`);
     });
@@ -163,6 +168,8 @@ async function show(name, arg) {
 }
 
 boot().catch((e) => {
-  document.getElementById("app").replaceChildren(h("div.page", h("div.notice.error", icon("warning"), h("b", "Die App konnte nicht starten"), h("span", String(e?.message || e)))));
+  const message = String(e?.stack || e?.message || e);
+  const report = h("div.actions", h("button.btn.secondary", { type: "button", onclick: () => bootReport(message) }, icon("warning"), "Fehler melden"));
+  document.getElementById("app").replaceChildren(h("div.page", h("div.notice.error", icon("warning"), h("b", "Die App konnte nicht starten"), h("span", String(e?.message || e)), report)));
   console.error(e);
 });

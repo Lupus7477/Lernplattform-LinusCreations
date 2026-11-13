@@ -277,6 +277,36 @@ impl Limiter {
     }
 }
 
+/// Eigenes Konto löschen. Der letzte Admin bleibt, sonst verwaltet niemand den Server.
+/// Geteilte eigene Kurse gehen an einen anderen Admin, damit die anderen sie behalten; private werden mit allem darin gelöscht.
+/// Sitzungen, Fortschritt, Einladungen und Mitgliedschaften gehen per CASCADE mit.
+pub fn delete_account(conn: &mut Connection, uid: i64) -> Result<(), String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    let tx = conn.transaction().map_err(e)?;
+    let is_admin: bool = tx.query_row("SELECT admin FROM users WHERE id = ?1", [uid], |r| r.get(0)).map_err(e)?;
+    let heir: Option<i64> = tx
+        .query_row("SELECT id FROM users WHERE admin = 1 AND disabled = 0 AND pw_hash IS NOT NULL AND id != ?1 ORDER BY id LIMIT 1", [uid], |r| r.get(0))
+        .optional()
+        .map_err(e)?;
+    if is_admin && heir.is_none() {
+        return Err("Als einziger Admin kannst du dein Konto nicht löschen: Der Server braucht jemanden, der ihn verwaltet.".into());
+    }
+    if let Some(h) = heir {
+        tx.execute(
+            "UPDATE courses SET owner_id = ?2 WHERE owner_id = ?1 AND (shared = 1 OR EXISTS(SELECT 1 FROM course_members m WHERE m.course_id = courses.id))",
+            params![uid, h],
+        )
+        .map_err(e)?;
+        // Der neue Besitzer ist dort kein Mitglied mehr, sondern Besitzer
+        tx.execute("DELETE FROM course_members WHERE user_id = ?1 AND course_id IN (SELECT id FROM courses WHERE owner_id = ?1)", [h]).map_err(e)?;
+    }
+    tx.execute("DELETE FROM courses WHERE owner_id = ?1", [uid]).map_err(e)?;
+    tx.execute("DELETE FROM lessons WHERE user_id = ?1", [uid]).map_err(e)?;
+    tx.execute("DELETE FROM settings WHERE key = ?1", [format!("goal:{uid}")]).map_err(e)?;
+    tx.execute("DELETE FROM users WHERE id = ?1", [uid]).map_err(e)?;
+    tx.commit().map_err(e)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +367,33 @@ mod tests {
         assert_eq!(device_label("Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"), "Firefox · Linux");
         assert_eq!(device_label("Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36"), "Chrome · Android");
         assert_eq!(device_label("Lernpfad-App (Android)"), "Lernpfad-App · Android");
+    }
+
+    #[test]
+    fn delete_account_keeps_shared_courses() {
+        let path = std::env::temp_dir().join(format!("lernpfad-auth-delete-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = lernpfad_core::db::open(&path).unwrap();
+        conn.execute_batch(
+            "UPDATE users SET pw_hash = 'x' WHERE id = 1;
+             INSERT INTO users(id, name, pw_hash, created_at) VALUES(2, 'Anna', 'x', 0), (3, 'Ben', 'x', 0);
+             INSERT INTO courses(id, name, created_at, owner_id, shared) VALUES(10, 'Geteilt', 0, 2, 1), (11, 'Privat', 0, 2, 0), (12, 'Ausgewählt', 0, 2, 0);
+             INSERT INTO course_members(course_id, user_id) VALUES(12, 1), (12, 3);
+             INSERT INTO lessons(xp, correct, total, finished_at, user_id) VALUES(10, 1, 1, 0, 2);",
+        )
+        .unwrap();
+        assert!(delete_account(&mut conn, 1).is_err(), "letzter Admin bleibt");
+        delete_account(&mut conn, 2).unwrap();
+        let courses: Vec<(i64, i64)> = {
+            let mut st = conn.prepare("SELECT id, owner_id FROM courses ORDER BY id").unwrap();
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        assert_eq!(courses, vec![(10, 1), (12, 1)], "geteilte gehen an den Admin, private sind weg");
+        let n = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(n("SELECT COUNT(*) FROM users WHERE id = 2"), 0);
+        assert_eq!(n("SELECT COUNT(*) FROM lessons WHERE user_id = 2"), 0);
+        assert_eq!(n("SELECT COUNT(*) FROM course_members WHERE course_id = 12"), 1, "Admin ist jetzt Besitzer statt Mitglied");
+        let _ = std::fs::remove_file(&path);
     }
 }

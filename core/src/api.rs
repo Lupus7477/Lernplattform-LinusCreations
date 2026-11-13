@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::ai::{self, Gen, Msg};
 use crate::learn::{Group, Spot};
-use crate::{db, import, learn, Core, Who};
+use crate::{db, import, learn, report, Core, Who};
 
 type R<T> = Result<T, String>;
 
@@ -45,6 +45,14 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
     }
     match cmd {
         "ai_status" => ok(c.ai.status()),
+        // Version, Projekt und die Meldungen, die kein Programmfehler sind (Fehler-Toast ohne „Melden“)
+        "version" => ok(json!({ "version": env!("CARGO_PKG_VERSION"), "repo": report::REPO, "normal": report::NORMAL })),
+        "triage_error" => {
+            let (message, cmd) = args!(v, { message: String, cmd: Option<String> });
+            ok(report::triage(&c.ai, head(&message, 2000), cmd.as_deref().unwrap_or("")))
+        }
+        // Issue-Text für den Link ohne Server; der Server ruft das mit seinen eigenen Systemdaten auf.
+        "draft_issue" => ok(report::make(&c.ai, serde_json::from_value(v).map_err(err)?)?),
         "ai_tiers" => ok(ai::TIERS.iter().map(|t| TierInfo { id: t.id, label: t.label, size: t.size }).collect::<Vec<_>>()),
         "ai_retry" => {
             admin(who)?;
@@ -60,13 +68,40 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
         }
         "courses" => ok(courses(c, who)?),
         "create_course" => {
-            let (name, exam_date) = args!(v, { name: String, exam_date: Option<String> });
-            ok(create_course(c, who, &name, exam_date)?)
+            let (name, exam_date, exam_focus) = args!(v, { name: String, exam_date: Option<String>, exam_focus: Option<String> });
+            ok(create_course(c, who, &name, exam_date, exam_focus)?)
         }
         "update_course" => {
-            let (id, name, exam_date, share, members, members_invite) =
-                args!(v, { id: i64, name: String, exam_date: Option<String>, share: Option<String>, members: Option<Vec<i64>>, members_invite: Option<bool> });
-            ok(update_course(c, who, id, &name, exam_date, share.as_deref(), members, members_invite)?)
+            let (id, name, exam_date, share, members, members_invite, exam_focus) = args!(v, {
+                id: i64, name: String, exam_date: Option<String>, share: Option<String>, members: Option<Vec<i64>>, members_invite: Option<bool>, exam_focus: Option<String>
+            });
+            ok(update_course(c, who, id, &name, exam_date, share.as_deref(), members, members_invite, exam_focus)?)
+        }
+        // Mitglied geht: Auswahl verlassen; bei „alle auf dem Server“ zusätzlich ausblenden. Fortschritt bleibt.
+        "leave_course" => {
+            let course_id = args!(v, { course_id: i64 });
+            let conn = c.db.lock().unwrap();
+            if role(&conn, who, course_id)? != Role::Member {
+                return Err("Deinen eigenen Kurs kannst du nur löschen.".into());
+            }
+            conn.execute("DELETE FROM course_members WHERE course_id = ?1 AND user_id = ?2", params![course_id, who.id]).map_err(err)?;
+            conn.execute("INSERT OR IGNORE INTO course_left(course_id, user_id) SELECT id, ?2 FROM courses WHERE id = ?1 AND shared = 1", params![course_id, who.id])
+                .map_err(err)?;
+            ok(())
+        }
+        // Verlassene Kurse, die weiter für alle geteilt sind (zum Wieder-Anzeigen)
+        "left_courses" => {
+            let conn = c.db.lock().unwrap();
+            let mut st = conn
+                .prepare("SELECT c.id, c.name FROM course_left l JOIN courses c ON c.id = l.course_id WHERE l.user_id = ?1 AND c.shared = 1 ORDER BY c.name COLLATE NOCASE")
+                .map_err(err)?;
+            let rows = st.query_map([who.id], |r| Ok(DocOut { id: r.get(0)?, name: r.get(1)? })).map_err(err)?;
+            ok(rows.collect::<Result<Vec<_>, _>>().map_err(err)?)
+        }
+        "rejoin_course" => {
+            let course_id = args!(v, { course_id: i64 });
+            let conn = c.db.lock().unwrap();
+            ok(conn.execute("DELETE FROM course_left WHERE course_id = ?1 AND user_id = ?2", params![course_id, who.id]).map_err(err)?)
         }
         // Personen, mit denen man teilen kann (aktive Konten des Servers), mit Häkchen, wer schon drin ist
         "share_people" => {
@@ -165,8 +200,8 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
             ok(ask(c, who, unit_id, messages, on_token)?)
         }
         "start_lesson" => {
-            let (unit_id, wrong_course) = args!(v, { unit_id: Option<i64>, wrong_course: Option<i64> });
-            ok(start_lesson(c, who, unit_id, wrong_course)?)
+            let (unit_id, wrong_course, exam_course) = args!(v, { unit_id: Option<i64>, wrong_course: Option<i64>, exam_course: Option<i64> });
+            ok(start_lesson(c, who, unit_id, wrong_course, exam_course)?)
         }
         "answer" => {
             let (question_id, given, retry) = args!(v, { question_id: i64, given: String, retry: bool });
@@ -239,6 +274,29 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
             .map_err(err)?;
             ok(())
         }
+        // Für die Klausur merken: nur für mich, wie Ausblenden
+        "mark_question" => {
+            let (question_id, marked) = args!(v, { question_id: i64, marked: bool });
+            let conn = c.db.lock().unwrap();
+            question_role(&conn, who, question_id)?;
+            conn.execute(
+                "INSERT INTO progress(user_id, question_id, marked) VALUES(?1, ?2, ?3)
+                 ON CONFLICT(user_id, question_id) DO UPDATE SET marked = excluded.marked",
+                params![who.id, question_id, marked],
+            )
+            .map_err(err)?;
+            ok(())
+        }
+        // Themenfilter überstimmen: ohne Aussortieren neu analysieren. Fragen und Fortschritt bleiben.
+        "include_orga" => {
+            let unit_id = args!(v, { unit_id: i64 });
+            let conn = c.db.lock().unwrap();
+            owner(unit_role(&conn, who, unit_id)?.1)?;
+            conn.execute("UPDATE units SET orga = NULL, status = 'pending', exam = NULL, explanation = NULL WHERE id = ?1", [unit_id]).map_err(err)?;
+            drop(conn);
+            c.wake();
+            ok(())
+        }
         "delete_question" => {
             let question_id = args!(v, { question_id: i64 });
             let conn = c.db.lock().unwrap();
@@ -257,16 +315,20 @@ pub enum Role {
     Owner,
 }
 
-/// SQL: Nutzer `p` (Parameter wie „?2“) darf Kurs `c` sehen: eigener Kurs, für alle geteilt oder ausgewählt.
+/// SQL: Nutzer `p` (Parameter wie „?2“) darf Kurs `c` sehen: eigener Kurs, für alle geteilt (und nicht verlassen) oder ausgewählt.
 fn can_see(p: &str) -> String {
-    format!("(c.owner_id = {p} OR c.shared = 1 OR EXISTS(SELECT 1 FROM course_members m WHERE m.course_id = c.id AND m.user_id = {p}))")
+    format!(
+        "(c.owner_id = {p} OR (c.shared = 1 AND NOT EXISTS(SELECT 1 FROM course_left l WHERE l.course_id = c.id AND l.user_id = {p}))
+          OR EXISTS(SELECT 1 FROM course_members m WHERE m.course_id = c.id AND m.user_id = {p}))"
+    )
 }
 
 /// Besitzer, Mitglied (für alle geteilt oder ausgewählt) oder kein Zugriff. Gleiche Regel wie [`can_see`].
 pub fn role(conn: &Connection, who: &Who, course_id: i64) -> R<Role> {
     let row: Option<(i64, bool)> = conn
         .query_row(
-            "SELECT owner_id, shared OR EXISTS(SELECT 1 FROM course_members m WHERE m.course_id = c.id AND m.user_id = ?2) FROM courses c WHERE id = ?1",
+            "SELECT owner_id, (shared AND NOT EXISTS(SELECT 1 FROM course_left l WHERE l.course_id = c.id AND l.user_id = ?2))
+               OR EXISTS(SELECT 1 FROM course_members m WHERE m.course_id = c.id AND m.user_id = ?2) FROM courses c WHERE id = ?1",
             params![course_id, who.id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -311,8 +373,10 @@ fn may_invite(conn: &Connection, who: &Who, course_id: i64) -> R<()> {
 }
 
 /// Nur aktive Konten mit Passwort, nie der Besitzer; unbekannte IDs fallen still weg.
+/// Wer den Kurs verlassen hatte und neu eingeladen wird, ist wieder dabei.
 fn add_members(conn: &Connection, course_id: i64, ids: &[i64]) -> R<()> {
     for id in ids.iter().take(1000) {
+        conn.execute("DELETE FROM course_left WHERE course_id = ?1 AND user_id = ?2", params![course_id, id]).map_err(err)?;
         conn.execute(
             "INSERT OR IGNORE INTO course_members(course_id, user_id)
              SELECT c.id, u.id FROM users u JOIN courses c ON c.id = ?1
@@ -387,6 +451,17 @@ struct Course {
     owner: String,
     /// Meine zuletzt falsch beantworteten Fragen in diesem Kurs
     wrong: i64,
+    /// Prüfungsschwerpunkte (Text des Besitzers)
+    exam_focus: String,
+    /// Vorschläge der KI aus Orga-Folien
+    exam_hints: Vec<String>,
+    /// Meine Klausurfragen: aus prüfungsrelevanten Einheiten oder von mir gemerkt
+    exam: i64,
+}
+
+/// SQL: Frage `q` gehört für Nutzer `p` zum Prüfungstraining: Einheit passt zu den Schwerpunkten oder Frage gemerkt.
+fn exam_question(p: &str) -> String {
+    format!("(COALESCE(u.exam, '[]') != '[]' OR EXISTS(SELECT 1 FROM progress pm WHERE pm.question_id = q.id AND pm.user_id = {p} AND pm.marked = 1))")
 }
 
 #[derive(Serialize)]
@@ -402,20 +477,25 @@ fn courses(c: &Core, who: &Who) -> R<Vec<Course>> {
         .prepare(&format!(
             "SELECT c.id, c.name, c.exam_date,
                (SELECT COUNT(*) FROM units u WHERE u.course_id = c.id),
-               (SELECT COUNT(*) FROM units u WHERE u.course_id = c.id AND u.status = 'ready'),
+               (SELECT COUNT(*) FROM units u WHERE u.course_id = c.id AND u.status != 'pending'),
                (SELECT json_group_array(json_object('id', d.id, 'name', d.name)) FROM (SELECT id, name FROM documents WHERE course_id = c.id ORDER BY (SELECT MIN(idx) FROM units WHERE document_id = documents.id), id) d),
                c.owner_id = ?1, c.shared, COALESCE(o.name, ''),
                (SELECT COUNT(*) FROM course_members m WHERE m.course_id = c.id), c.members_invite,
                (SELECT COUNT(*) FROM progress p JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id
-                 WHERE u.course_id = c.id AND p.user_id = ?1 AND p.wrong = 1 AND p.hidden = 0)
+                 WHERE u.course_id = c.id AND p.user_id = ?1 AND p.wrong = 1 AND p.hidden = 0),
+               c.exam_focus,
+               (SELECT json_group_array(h) FROM (SELECT exam_hint AS h FROM units WHERE course_id = c.id AND exam_hint != '' GROUP BY exam_hint ORDER BY MIN(idx))),
+               (SELECT COUNT(*) FROM questions q JOIN units u ON u.id = q.unit_id LEFT JOIN progress p ON p.question_id = q.id AND p.user_id = ?1
+                 WHERE u.course_id = c.id AND COALESCE(p.hidden, 0) = 0 AND {})
              FROM courses c LEFT JOIN users o ON o.id = c.owner_id
              WHERE {} ORDER BY c.created_at",
+            exam_question("?1"),
             can_see("?1")
         ))
         .map_err(err)?;
     let rows = stmt
         .query_map([who.id], |r| {
-            let docs: String = r.get(5)?;
+            let (docs, hints): (String, String) = (r.get(5)?, r.get(13)?);
             let (mine, share_all, members, members_invite): (bool, bool, i64, bool) = (r.get(6)?, r.get(7)?, r.get(9)?, r.get(10)?);
             Ok(Course {
                 id: r.get(0)?,
@@ -432,6 +512,9 @@ fn courses(c: &Core, who: &Who) -> R<Vec<Course>> {
                 can_invite: mine || (members_invite && !share_all),
                 owner: r.get(8)?,
                 wrong: r.get(11)?,
+                exam_focus: r.get(12)?,
+                exam_hints: serde_json::from_str(&hints).unwrap_or_default(),
+                exam: r.get(14)?,
             })
         })
         .map_err(err)?;
@@ -446,11 +529,16 @@ fn course_name(name: &str) -> R<&str> {
     Ok(head(name, 120))
 }
 
-fn create_course(c: &Core, who: &Who, name: &str, exam_date: Option<String>) -> R<i64> {
+/// Prüfungsschwerpunkte: höchstens 4000 Zeichen, ohne Leerraum am Rand.
+fn exam_focus(focus: Option<String>) -> Option<String> {
+    focus.map(|f| head(f.trim(), 4000).to_string())
+}
+
+fn create_course(c: &Core, who: &Who, name: &str, exam_date: Option<String>, focus: Option<String>) -> R<i64> {
     let conn = c.db.lock().unwrap();
     conn.execute(
-        "INSERT INTO courses(name, exam_date, created_at, owner_id) VALUES(?1, ?2, ?3, ?4)",
-        params![course_name(name)?, exam_date.filter(|d| !d.is_empty()), db::now(), who.id],
+        "INSERT INTO courses(name, exam_date, created_at, owner_id, exam_focus) VALUES(?1, ?2, ?3, ?4, ?5)",
+        params![course_name(name)?, exam_date.filter(|d| !d.is_empty()), db::now(), who.id, exam_focus(focus).unwrap_or_default()],
     )
     .map_err(err)?;
     Ok(conn.last_insert_rowid())
@@ -458,7 +546,9 @@ fn create_course(c: &Core, who: &Who, name: &str, exam_date: Option<String>) -> 
 
 /// `share`: „none“ = nur ich, „some“ = ausgewählte Personen (`members` ersetzt die Auswahl), „all“ = alle auf dem Server.
 /// Bei „all“ bleibt die Auswahl gespeichert, falls man zurückwechselt.
-fn update_course(c: &Core, who: &Who, id: i64, name: &str, exam_date: Option<String>, share: Option<&str>, members: Option<Vec<i64>>, members_invite: Option<bool>) -> R<()> {
+/// `exam_focus` None = unverändert. Geänderte Schwerpunkte: alle Einheiten neu zuordnen (Worker).
+#[allow(clippy::too_many_arguments)]
+fn update_course(c: &Core, who: &Who, id: i64, name: &str, exam_date: Option<String>, share: Option<&str>, members: Option<Vec<i64>>, members_invite: Option<bool>, focus: Option<String>) -> R<()> {
     let mut conn = c.db.lock().unwrap();
     owner(role(&conn, who, id)?)?;
     let all = match share {
@@ -473,6 +563,12 @@ fn update_course(c: &Core, who: &Who, id: i64, name: &str, exam_date: Option<Str
         params![course_name(name)?, exam_date.filter(|d| !d.is_empty()), all, members_invite, id],
     )
     .map_err(err)?;
+    if let Some(f) = exam_focus(focus) {
+        let changed = tx.execute("UPDATE courses SET exam_focus = ?1 WHERE id = ?2 AND exam_focus != ?1", params![f, id]).map_err(err)?;
+        if changed > 0 {
+            tx.execute("UPDATE units SET exam = NULL WHERE course_id = ?1", [id]).map_err(err)?;
+        }
+    }
     match (share, members) {
         (Some("none"), _) => {
             tx.execute("DELETE FROM course_members WHERE course_id = ?1", [id]).map_err(err)?;
@@ -483,7 +579,9 @@ fn update_course(c: &Core, who: &Who, id: i64, name: &str, exam_date: Option<Str
         }
         _ => {}
     }
-    tx.commit().map_err(err)
+    tx.commit().map_err(err)?;
+    c.wake();
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -515,6 +613,8 @@ struct UnitNode {
     mastery: f64,
     due: i64,
     lessons: i64,
+    /// Passt zu den Prüfungsschwerpunkten des Kurses
+    exam: bool,
 }
 
 fn course_path(c: &Core, who: &Who, course_id: i64) -> R<Vec<UnitNode>> {
@@ -531,7 +631,7 @@ fn course_path(c: &Core, who: &Who, course_id: i64) -> R<Vec<UnitNode>> {
                (SELECT COUNT(*) FROM questions q JOIN progress p ON p.question_id = q.id AND p.user_id = ?3
                  WHERE q.unit_id = u.id AND p.hidden = 0 AND p.box > 0 AND p.due_at <= ?2),
                (SELECT COUNT(*) FROM lessons l WHERE l.unit_id = u.id AND l.user_id = ?3),
-               u.document_id, d.name
+               u.document_id, d.name, COALESCE(u.exam, '[]') != '[]'
              FROM units u JOIN documents d ON d.id = u.document_id WHERE u.course_id = ?1 ORDER BY u.idx",
         )
         .map_err(err)?;
@@ -550,6 +650,7 @@ fn course_path(c: &Core, who: &Who, course_id: i64) -> R<Vec<UnitNode>> {
                 lessons: r.get(9)?,
                 document_id: r.get(10)?,
                 document: r.get(11)?,
+                exam: r.get(12)?,
             })
         })
         .map_err(err)?;
@@ -575,6 +676,15 @@ struct UnitDetail {
     page_to: i64,
     document: String,
     terms: Vec<TermOut>,
+    /// Seiten, die als Organisatorisches nicht abgefragt werden
+    orga: usize,
+    /// Passende Prüfungsthemen
+    exam: Vec<String>,
+}
+
+/// Prüfungsthemen einer Einheit aus `units.exam`.
+fn topics(exam: Option<String>) -> Vec<String> {
+    exam.and_then(|e| serde_json::from_str(&e).ok()).unwrap_or_default()
 }
 
 fn unit_terms(conn: &Connection, where_sql: &str, p: impl rusqlite::Params) -> R<Vec<TermOut>> {
@@ -594,11 +704,14 @@ fn unit(c: &Core, who: &Who, unit_id: i64) -> R<UnitDetail> {
     unit_role(&conn, who, unit_id)?;
     let mut d = conn
         .query_row(
-            "SELECT u.id, u.course_id, u.title, u.summary, u.explanation, u.page_from, u.page_to, d.name
+            "SELECT u.id, u.course_id, u.title, u.summary, u.explanation, u.page_from, u.page_to, d.name, u.orga, u.exam
              FROM units u JOIN documents d ON d.id = u.document_id WHERE u.id = ?1",
             [unit_id],
             |r| {
+                let orga: Option<String> = r.get(8)?;
                 Ok(UnitDetail {
+                    orga: orga.and_then(|o| serde_json::from_str::<Vec<usize>>(&o).ok()).map_or(0, |v| v.len()),
+                    exam: topics(r.get(9)?),
                     id: r.get(0)?,
                     course_id: r.get(1)?,
                     title: r.get(2)?,
@@ -616,21 +729,26 @@ fn unit(c: &Core, who: &Who, unit_id: i64) -> R<UnitDetail> {
     Ok(d)
 }
 
-fn unit_text(c: &Core, who: &Who, unit_id: i64) -> R<(String, String, Option<String>)> {
+/// Titel, Lerntext (ohne Organisatorisches), gespeicherte Erklärung und Prüfungsthemen einer Einheit.
+fn unit_text(c: &Core, who: &Who, unit_id: i64) -> R<(String, String, Option<String>, Vec<String>)> {
     let conn = c.db.lock().unwrap();
     unit_role(&conn, who, unit_id)?;
-    conn.query_row("SELECT title, source_text, explanation FROM units WHERE id = ?1", [unit_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .map_err(err)
+    conn.query_row("SELECT title, source_text, explanation, orga, exam FROM units WHERE id = ?1", [unit_id], |r| {
+        let (source, orga): (String, Option<String>) = (r.get(1)?, r.get(3)?);
+        Ok((r.get(0)?, import::learn_text(&source, orga.as_deref()), r.get(2)?, topics(r.get(4)?)))
+    })
+    .map_err(err)
 }
 
 /// Ausführliche Erklärung: einmal gestreamt erzeugen, danach aus der Datenbank (gilt für alle im Kurs).
 fn explain(c: &Core, who: &Who, unit_id: i64, on_token: &mut dyn FnMut(&str)) -> R<String> {
-    let (title, text, cached) = unit_text(c, who, unit_id)?;
+    let (title, text, cached, exam) = unit_text(c, who, unit_id)?;
     if let Some(x) = cached {
         return Ok(x);
     }
+    let focus = if exam.is_empty() { String::new() } else { format!(" Geh besonders ein auf: {}.", exam.join("; ")) };
     let user = format!(
-        "Erkläre das Thema „{title}“ anhand dieses Lernmaterials so, dass es jemand ohne Vorwissen versteht.\n\n\
+        "Erkläre das Thema „{title}“ anhand dieses Lernmaterials so, dass es jemand ohne Vorwissen versteht.{focus}\n\n\
          Lernmaterial:\n<<<\n{text}\n>>>\n\n\
          Schreibe Markdown mit kurzen Absätzen und **fetten** Fachbegriffen, genau in diesem Aufbau:\n\
          ## Worum geht's?\n1–2 Sätze: was ist das und warum ist es wichtig.\n\
@@ -660,7 +778,7 @@ fn ask(c: &Core, who: &Who, unit_id: Option<i64>, messages: Vec<ChatIn>, on_toke
          Wenn etwas nicht im Lernmaterial steht, sag das ehrlich.",
     );
     if let Some(id) = unit_id {
-        let (title, text, _) = unit_text(c, who, id)?;
+        let (title, text, _, _) = unit_text(c, who, id)?;
         system.push_str(&format!("\n\nThema: {title}\nLernmaterial:\n<<<\n{}\n>>>", head(&text, 4000)));
     }
     let mut msgs = vec![Msg { role: "system", content: system }];
@@ -741,8 +859,9 @@ struct LessonOut {
 
 const LESSON_SIZE: usize = 8;
 
-/// Lektion einer Einheit, „Falsche wiederholen“ eines Kurses (`wrong_course`) oder die tägliche Wiederholung (beides None).
-fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>, wrong_course: Option<i64>) -> R<LessonOut> {
+/// Lektion einer Einheit, „Falsche wiederholen“ (`wrong_course`), Prüfungstraining (`exam_course`) eines Kurses
+/// oder die tägliche Wiederholung (alles None).
+fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>, wrong_course: Option<i64>, exam_course: Option<i64>) -> R<LessonOut> {
     let conn = c.db.lock().unwrap();
     let now = db::now();
     let mut rng = learn::Shuffler::new();
@@ -756,7 +875,11 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>, wrong_course: Option<
         let _ = conn.execute("UPDATE units SET q_state = 1 WHERE id = ?1 AND q_state = 0 AND status = 'ready'", [id]);
         let (idx, q_state): (i64, i64) = conn.query_row("SELECT idx, q_state FROM units WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?;
         // Nächste Einheit schon vorbereiten, während diese geübt wird.
-        let _ = conn.execute("UPDATE units SET q_state = 1 WHERE course_id = ?1 AND idx = ?2 AND q_state = 0", params![course_id, idx + 1]);
+        // Orga-Einheiten überspringen: die nächste mit Lerninhalt.
+        let _ = conn.execute(
+            "UPDATE units SET q_state = 1 WHERE course_id = ?1 AND q_state = 0 AND idx = (SELECT MIN(idx) FROM units WHERE course_id = ?1 AND idx > ?2 AND status != 'orga')",
+            params![course_id, idx],
+        );
         // Fällige zuerst, dann neue, dann die mit der niedrigsten Box. Ausgeblendete nie.
         picked = query_questions(
             &conn,
@@ -813,6 +936,21 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>, wrong_course: Option<
             ),
             params![course, who.id, 12],
         )?;
+    } else if let Some(course) = exam_course {
+        role(&conn, who, course)?;
+        // Prüfungsthemen und Gemerktes: fällige zuerst, dann neue, dann die mit der niedrigsten Box
+        picked = query_questions(
+            &conn,
+            &format!(
+                "{SELECT} questions q JOIN units u ON u.id = q.unit_id LEFT JOIN progress p ON p.question_id = q.id AND p.user_id = ?2
+                 LEFT JOIN figures f ON f.id = q.figure_id
+                 WHERE u.course_id = ?1 AND COALESCE(p.hidden, 0) = 0 AND {}
+                 ORDER BY CASE WHEN p.box > 0 AND p.due_at <= ?3 THEN 0 WHEN COALESCE(p.box, 0) = 0 THEN 1 ELSE 2 END, COALESCE(p.box, 0), RANDOM()
+                 LIMIT ?4",
+                exam_question("?2")
+            ),
+            params![course, who.id, now, 12],
+        )?;
     } else {
         picked = query_questions(
             &conn,
@@ -821,7 +959,7 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>, wrong_course: Option<
                  JOIN questions q ON q.id = p.question_id JOIN units u ON u.id = q.unit_id JOIN courses c ON c.id = u.course_id
                  LEFT JOIN figures f ON f.id = q.figure_id
                  WHERE p.user_id = ?3 AND p.hidden = 0 AND p.box > 0 AND p.due_at <= ?1 AND {}
-                 ORDER BY p.due_at LIMIT ?2",
+                 ORDER BY p.marked = 1 OR COALESCE(u.exam, '[]') != '[]' DESC, p.due_at LIMIT ?2",
                 can_see("?3")
             ),
             params![now, 10, who.id],
@@ -838,7 +976,7 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>, wrong_course: Option<
     // Zuordnen-Runde aus den Begriffen – ganz ohne KI. Nicht bei „Falsche wiederholen“: dort zählen nur die Fragen.
     let term_sql = match unit_id {
         Some(_) => "SELECT term, definition FROM terms WHERE unit_id = ?1".to_string(),
-        None if wrong_course.is_none() && !ids.is_empty() => format!(
+        None if wrong_course.is_none() && exam_course.is_none() && !ids.is_empty() => format!(
             "SELECT term, definition FROM terms WHERE unit_id IN (SELECT unit_id FROM questions WHERE id IN ({}))",
             ids.join(",")
         ),
@@ -1045,6 +1183,8 @@ struct QuestionOut {
     figure_id: Option<i64>,
     /// Von mir ausgeblendet
     hidden: bool,
+    /// Von mir für die Klausur gemerkt
+    marked: bool,
     /// Mein Kurs → darf für alle löschen
     mine: bool,
     shared: bool,
@@ -1054,7 +1194,7 @@ fn questions_where(conn: &Connection, who: &Who, where_sql: &str, id: i64) -> R<
     let sql = format!(
         "SELECT q.id, q.unit_id, q.kind, q.prompt, q.options, q.answer, q.why, COALESCE(p.hidden, 0), c.owner_id = ?2,
            c.shared OR EXISTS(SELECT 1 FROM course_members m WHERE m.course_id = c.id),
-           q.groups, q.spots, q.figure_id
+           q.groups, q.spots, q.figure_id, COALESCE(p.marked, 0)
          FROM questions q JOIN units u ON u.id = q.unit_id JOIN courses c ON c.id = u.course_id
          LEFT JOIN progress p ON p.question_id = q.id AND p.user_id = ?2
          WHERE {where_sql}"
@@ -1076,6 +1216,7 @@ fn questions_where(conn: &Connection, who: &Who, where_sql: &str, id: i64) -> R<
                 spots: serde_json::from_str(&spots).unwrap_or_default(),
                 figure_id: r.get(12)?,
                 hidden: r.get(7)?,
+                marked: r.get(13)?,
                 mine: r.get(8)?,
                 shared: r.get(9)?,
             })
@@ -1572,5 +1713,85 @@ mod tests {
         share(json!({ "id": course, "name": "Mikro", "share": "none" }));
         assert!(!sees(&U2) && !sees(&U3));
         assert!(run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "share": "egal" })).is_err());
+    }
+
+    #[test]
+    fn orga_units_and_exam_training() {
+        use serde_json::json;
+        let dir = tmp("exam");
+        let c = core(&dir);
+        let (course, unit, q, q2) = seed(&c);
+        c.db.lock().unwrap().execute_batch(
+            "INSERT INTO units(id, course_id, document_id, idx, page_from, page_to, title, source_text, status, orga) VALUES(31, 10, 20, 1, 4, 4, 'Organisatorisches', 'Klausur am 14.02.', 'orga', '[0]');
+             UPDATE units SET source_text = 'Agenda\n\nDie Nachfrage fällt mit dem Preis.', orga = '[0]' WHERE id = 30;",
+        )
+        .unwrap();
+        // Lerntext ohne Orga-Seite, Lernkarte zählt sie
+        assert_eq!(unit_text(&c, &crate::LOCAL, unit).unwrap().1, "Die Nachfrage fällt mit dem Preis.");
+        assert_eq!(run(&c, &crate::LOCAL, "unit", json!({ "unitId": unit })).unwrap()["orga"], 1);
+        // Orga-Einheit zählt als fertig, liefert aber keine Lektion
+        assert_eq!(run(&c, &crate::LOCAL, "courses", Value::Null).unwrap()[0]["ready"], 2);
+        assert_eq!(run(&c, &crate::LOCAL, "start_lesson", json!({ "unitId": 31 })).unwrap()["ready"], false);
+        // „Doch lernen“: nur der Besitzer; danach ohne Filter neu analysieren
+        run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "share": "all" })).unwrap();
+        assert_eq!(run(&c, &U2, "include_orga", json!({ "unitId": 31 })).unwrap_err(), DENIED);
+        run(&c, &crate::LOCAL, "include_orga", json!({ "unitId": 31 })).unwrap();
+        let (status, orga): (String, Option<String>) = c.db.lock().unwrap().query_row("SELECT status, orga FROM units WHERE id = 31", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((status.as_str(), orga), ("pending", None));
+        assert!(matches!(db::next_task(&c.db.lock().unwrap()).unwrap(), Some(db::Task::Analyze { unit_id: 31, filter: false, .. })));
+
+        // Schwerpunkte setzen: Einheiten werden neu zugeordnet; Fragen warten, bis die Einheit geprüft ist
+        let exam = |who: &Who| run(&c, who, "courses", Value::Null).unwrap()[0]["exam"].as_i64().unwrap();
+        let training = |who: &Who| -> Vec<i64> {
+            let l = run(&c, who, "start_lesson", json!({ "examCourse": course })).unwrap();
+            let mut ids: Vec<i64> = l["exercises"].as_array().unwrap().iter().filter_map(|e| e["id"].as_i64()).collect();
+            ids.sort();
+            ids
+        };
+        c.db.lock().unwrap().execute("UPDATE units SET status = 'ready', exam = '[]', q_state = 1 WHERE id = 30", []).unwrap();
+        run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "examFocus": "1. Nachfrage\n2. Marktformen" })).unwrap();
+        assert_eq!(run(&c, &crate::LOCAL, "courses", Value::Null).unwrap()[0]["exam_focus"], "1. Nachfrage\n2. Marktformen");
+        match db::next_task(&c.db.lock().unwrap()).unwrap() {
+            Some(db::Task::Focus { unit_id, topics, .. }) => assert_eq!((unit_id, topics), (30, vec!["Nachfrage".to_string(), "Marktformen".to_string()])),
+            _ => panic!("erst die Prüfungsthemen der wartenden Einheit"),
+        }
+        assert_eq!((exam(&crate::LOCAL), training(&crate::LOCAL)), (0, vec![]));
+
+        // Lesezeichen: nur für mich
+        run(&c, &U2, "mark_question", json!({ "questionId": q, "marked": true })).unwrap();
+        assert_eq!((exam(&U2), training(&U2), exam(&crate::LOCAL)), (1, vec![q], 0));
+        assert_eq!(run(&c, &U2, "question", json!({ "questionId": q })).unwrap()["marked"], true);
+
+        // Einheit passt zu den Schwerpunkten → alle ihre Fragen gehören zum Training, die Einheit ist markiert
+        c.db.lock().unwrap().execute("UPDATE units SET exam = '[\"Nachfrage\"]' WHERE id = 30", []).unwrap();
+        assert_eq!((exam(&crate::LOCAL), training(&crate::LOCAL)), (2, vec![q, q2]));
+        assert_eq!(run(&c, &crate::LOCAL, "course_path", json!({ "courseId": course })).unwrap()[0]["exam"], true);
+        assert!(matches!(db::next_task(&c.db.lock().unwrap()).unwrap(), Some(db::Task::Questions { unit_id: 30, ref topics, .. }) if topics == &["Nachfrage".to_string()]));
+    }
+
+    #[test]
+    fn leave_and_rejoin() {
+        use serde_json::json;
+        let dir = tmp("leave");
+        let c = core(&dir);
+        let (course, unit, _, _) = seed(&c);
+        let sees = |who: &Who| run(&c, who, "courses", Value::Null).unwrap().as_array().unwrap().len() == 1;
+        assert!(run(&c, &crate::LOCAL, "leave_course", json!({ "courseId": course })).is_err()); // Besitzer löscht, verlässt nicht
+
+        // Für alle geteilt: verlassen blendet aus, wieder anzeigen holt zurück
+        run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "share": "all" })).unwrap();
+        run(&c, &U2, "leave_course", json!({ "courseId": course })).unwrap();
+        assert!(!sees(&U2) && sees(&U3));
+        assert_eq!(run(&c, &U2, "course_path", json!({ "courseId": course })).unwrap_err(), DENIED);
+        assert_eq!(run(&c, &U2, "left_courses", Value::Null).unwrap(), json!([{ "id": course, "name": "Mikro" }]));
+        run(&c, &U2, "rejoin_course", json!({ "courseId": course })).unwrap();
+        assert!(sees(&U2) && run(&c, &U2, "start_lesson", json!({ "unitId": unit })).is_ok());
+
+        // Ausgewählte Personen: verlassen löscht die Mitgliedschaft, neue Einladung holt zurück
+        run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "share": "some", "members": [2] })).unwrap();
+        run(&c, &U2, "leave_course", json!({ "courseId": course })).unwrap();
+        assert!(!sees(&U2));
+        run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "share": "some", "members": [2] })).unwrap();
+        assert!(sees(&U2));
     }
 }

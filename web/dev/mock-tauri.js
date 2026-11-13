@@ -58,7 +58,7 @@ const db = {
   courses: q.has("empty")
     ? []
     : [
-        { id: 1, name: "Mikroökonomie", exam_date: day(-23), created_at: 1, owner_id: 1, shared: false },
+        { id: 1, name: "Mikroökonomie", exam_date: day(-23), created_at: 1, owner_id: 1, shared: false, exam_focus: "Marktgleichgewicht\nPreiselastizität der Nachfrage", exam_hints: ["Klausurrelevant sind Kapitel 1 bis 3 und die Elastizitäten", "Keine Fragen zur Spieltheorie"] },
         { id: 2, name: "Wirtschaftsinformatik", exam_date: day(-40), created_at: 2, owner_id: 1, shared: false },
       ],
   documents: [
@@ -68,10 +68,11 @@ const db = {
   ],
   figures: [{ id: 1, unit_id: 8, page: 4, image: swotImage() }],
   units: [
-    { id: 1, course_id: 1, document_id: 1, idx: 0, page_from: 1, page_to: 6, title: "Angebot und Nachfrage", summary: "Wie Käufer und Verkäufer auf Preise reagieren und warum Nachfragekurven fallen und Angebotskurven steigen.", status: "ready", q_state: 2 },
-    { id: 2, course_id: 1, document_id: 1, idx: 1, page_from: 7, page_to: 12, title: "Das Marktgleichgewicht", summary: "Wo sich Angebot und Nachfrage treffen und was bei Überschuss oder Knappheit passiert.", status: "ready", q_state: 2 },
+    { id: 9, course_id: 1, document_id: 1, idx: -1, page_from: 1, page_to: 2, title: "Organisatorisches", summary: "Termine der Vorlesung, Ablauf der Klausur und die Literaturliste.", status: "orga", q_state: 0 },
+    { id: 1, course_id: 1, document_id: 1, idx: 0, page_from: 1, page_to: 6, orga: 1, title: "Angebot und Nachfrage", summary: "Wie Käufer und Verkäufer auf Preise reagieren und warum Nachfragekurven fallen und Angebotskurven steigen.", status: "ready", q_state: 2 },
+    { id: 2, course_id: 1, document_id: 1, idx: 1, page_from: 7, page_to: 12, exam: ["Marktgleichgewicht"], title: "Das Marktgleichgewicht", summary: "Wo sich Angebot und Nachfrage treffen und was bei Überschuss oder Knappheit passiert.", status: "ready", q_state: 2 },
     { id: 3, course_id: 1, document_id: 1, idx: 2, page_from: 13, page_to: 17, title: "Verschiebungen der Kurven", summary: "Welche Ereignisse eine Kurve verschieben und welche nur eine Bewegung entlang der Kurve auslösen.", status: "ready", q_state: 2 },
-    { id: 4, course_id: 1, document_id: 2, idx: 3, page_from: 1, page_to: 5, title: "Preiselastizität der Nachfrage", summary: "Wie stark die nachgefragte Menge reagiert, wenn sich der Preis ändert.", status: "ready", q_state: 2 },
+    { id: 4, course_id: 1, document_id: 2, idx: 3, page_from: 1, page_to: 5, exam: ["Preiselastizität der Nachfrage"], title: "Preiselastizität der Nachfrage", summary: "Wie stark die nachgefragte Menge reagiert, wenn sich der Preis ändert.", status: "ready", q_state: 2 },
     { id: 5, course_id: 1, document_id: 2, idx: 4, page_from: 6, page_to: 10, title: "Kreuzpreis- und Einkommenselastizität", summary: "Substitute, Komplemente und was ein höheres Einkommen mit der Nachfrage macht.", status: "ready", q_state: 1 },
     { id: 6, course_id: 1, document_id: 2, idx: 5, page_from: 11, page_to: 15, title: "Seiten 11-15", summary: "", status: "pending", q_state: 0 },
     { id: 7, course_id: 1, document_id: 2, idx: 6, page_from: 16, page_to: 19, title: "Seiten 16-19", summary: "", status: "pending", q_state: 0 },
@@ -269,6 +270,7 @@ const handlers = {
       const us = db.units.filter((u) => u.course_id === c.id);
       const picked = courseMembers.get(c.id)?.size ?? 0;
       const wrong = visible().filter((x) => x.wrong && us.some((u) => u.id === x.unit_id)).length;
+      const exam = visible().filter((x) => us.some((u) => u.id === x.unit_id && (u.exam?.length || x.marked))).length;
       return {
         ...c,
         mine: true,
@@ -279,8 +281,11 @@ const handlers = {
         members_invite: !!c.members_invite,
         can_invite: true,
         wrong,
+        exam,
+        exam_focus: c.exam_focus ?? "",
+        exam_hints: c.exam_hints ?? [],
         units: us.length,
-        ready: us.filter((u) => u.status === "ready").length,
+        ready: us.filter((u) => u.status !== "pending").length,
         documents: db.documents
           .filter((d) => d.course_id === c.id)
           .sort((a, b) => firstIdx(a) - firstIdx(b))
@@ -292,8 +297,9 @@ const handlers = {
     db.courses.push({ id, name, exam_date: examDate, created_at: now(), owner_id: 1, shared: false });
     return id;
   },
-  update_course: ({ id, name, examDate, share, members: picked, membersInvite }) => {
+  update_course: ({ id, name, examDate, share, members: picked, membersInvite, examFocus }) => {
     const c = db.courses.find((x) => x.id === id);
+    if (examFocus != null) c.exam_focus = examFocus;
     Object.assign(c, { name, exam_date: examDate }, share ? { shared: share === "all" } : {}, membersInvite == null ? {} : { members_invite: membersInvite });
     if (share === "none") courseMembers.delete(id);
     if (share === "some" && picked) courseMembers.set(id, new Set(picked));
@@ -353,11 +359,12 @@ const handlers = {
           mastery: qs.length ? qs.reduce((a, x) => a + x.box, 0) / qs.length : 0,
           due: qs.filter((x) => x.box > 0 && x.due_at <= now()).length,
           lessons: db.lessons.filter((l) => l.unit_id === u.id).length,
+          exam: !!u.exam?.length,
         };
       }),
   unit: ({ unitId }) => {
     const u = db.units.find((x) => x.id === unitId);
-    return { ...u, document: db.documents.find((d) => d.id === u.document_id).name, explanation: u.explanation ?? null, terms: db.terms.filter((t) => t.unit_id === unitId).map((t) => ({ ...t, unit_title: u.title })) };
+    return { ...u, orga: u.orga ?? 0, exam: u.exam ?? [], document: db.documents.find((d) => d.id === u.document_id).name, explanation: u.explanation ?? null, terms: db.terms.filter((t) => t.unit_id === unitId).map((t) => ({ ...t, unit_title: u.title })) };
   },
   search_terms: ({ query }) => db.terms.filter((t) => (t.term + t.definition).toLowerCase().includes(query.toLowerCase())).map((t) => ({ ...t, unit_title: db.units.find((u) => u.id === t.unit_id).title })),
   explain: async ({ unitId, onToken }) => {
@@ -367,7 +374,14 @@ const handlers = {
     return u.explanation;
   },
   ask: ({ onToken }) => streamText("Gute Frage! Bei einem **höheren Preis** lohnt sich der Kauf für weniger Menschen. Deshalb sinkt die nachgefragte Menge, solange alles andere gleich bleibt.", onToken),
-  start_lesson: ({ unitId, wrongCourse }) => {
+  start_lesson: ({ unitId, wrongCourse, examCourse }) => {
+    if (examCourse != null) {
+      const pool = visible().filter((x) => {
+        const u = db.units.find((v) => v.id === x.unit_id);
+        return u?.course_id === examCourse && (u.exam?.length || x.marked);
+      });
+      return { ready: true, failed: false, exercises: shuffle(pool).slice(0, 12).map(toExercise) };
+    }
     const inCourse = (x) => db.units.find((u) => u.id === x.unit_id)?.course_id === wrongCourse;
     const pool = wrongCourse != null ? visible().filter((x) => x.wrong && inCourse(x)) : unitId == null ? visible().filter((x) => x.box > 0 && x.due_at <= now()) : visible().filter((x) => x.unit_id === unitId);
     if (wrongCourse != null) return { ready: true, failed: false, exercises: shuffle(pool).slice(0, 12).map(toExercise) };
@@ -428,9 +442,48 @@ const handlers = {
     return full(x);
   },
   hide_question: ({ questionId, hidden }) => (db.questions.find((x) => x.id === questionId).hidden = hidden),
+  mark_question: ({ questionId, marked }) => (db.questions.find((x) => x.id === questionId).marked = marked),
+  include_orga: ({ unitId }) => {
+    const u = db.units.find((x) => x.id === unitId);
+    Object.assign(u, { orga: 0, status: "pending", title: `Seiten ${u.page_from}-${u.page_to}` });
+    setTimeout(() => {
+      Object.assign(u, { status: "ready", title: "Einführung und Überblick" });
+      fire("course-updated", u.course_id);
+    }, 1500);
+  },
+  leave_course: ({ courseId }) => {
+    left.push(db.courses.find((c) => c.id === courseId));
+    db.courses = db.courses.filter((c) => c.id !== courseId);
+  },
+  left_courses: () => left.map((c) => ({ id: c.id, name: c.name })),
+  rejoin_course: ({ courseId }) => {
+    db.courses.push(left.find((c) => c.id === courseId));
+    left = left.filter((c) => c.id !== courseId);
+  },
+  // Fehler melden (core/src/report.rs): Regeln wie im Kern, die KI ist hier nachgestellt
+  version: () => ({ version: "0.4.0-dev", repo: "Lupus7477/Lernplattform-LinusCreations", normal: ["kein zugriff", "eingescannt", "melde dich an", "nicht erreichbar", "passwort", "zu viele"] }),
+  device_info: () => ({ version: "0.4.0-dev", build: "debug", os: "linux", arch: "x86_64", os_name: "Mock-Linux", cpu_threads: 8, ram_total_mb: 16000, ram_free_mb: 9000, ki: { ...ai, backend: "Vulkan", on_gpu: true }, db: { schema: 4, courses: db.courses.length } }),
+  triage_error: ({ message }) => {
+    if (/typeerror|unbekannter befehl|undefined/i.test(message)) return { code: true, hint: "", by: "regel" };
+    if (/kein zugriff|eingescannt/i.test(message)) return { code: false, hint: "", by: "regel" };
+    return { code: !/datei|pdf/i.test(message), hint: "Das sieht nach einem Fehler im Programm aus.", by: "ki" };
+  },
+  draft_issue: ({ kind, text, error, question, device }) => ({
+    title: kind === "idea" ? "Wunsch: " + (text.split("\n")[0] || "Idee").slice(0, 60) : (text || error).split("\n")[0].slice(0, 70) || "Fehler",
+    body: `## Beschreibung (KI)\n\n(Mock) ${text}\n\n## Originaltext\n\n\`\`\`text\n${text}\n\`\`\`\n${error ? `\n## Fehlermeldung\n\n\`\`\`text\n${error}\n\`\`\`\n` : ""}${question ? `\n## Frage\n\n\`\`\`text\n${question}\n\`\`\`\n` : ""}\n<details><summary>Gerät</summary>\n\n\`\`\`json\n${JSON.stringify(device, null, 2)}\n\`\`\`\n</details>\n`,
+    label: kind === "idea" ? "enhancement" : "bug",
+  }),
+  report_issue: ({ device }) => {
+    if (!device) throw "Die Systemdaten des Geräts fehlen.";
+    return { number: 42, url: "https://github.com/Lupus7477/Lernplattform-LinusCreations/issues/42" };
+  },
+  delete_account: ({ current }) => {
+    if (current !== "richtig-gutes-passwort") throw "Das aktuelle Passwort stimmt nicht.";
+    user = null;
+  },
   delete_question: ({ questionId }) => (db.questions = db.questions.filter((x) => x.id !== questionId)),
   // Server-Modus (?server): Konto, Geräte, Mitglieder
-  session: () => (q.has("server") ? { mode: "server", user, setup: false } : { mode: "local", user: null }),
+  session: () => (q.has("server") ? { mode: "server", user, setup: false, report: true } : { mode: "local", user: null }),
   login: ({ name, password }) => {
     if (password !== "richtig-gutes-passwort") {
       if (++fails >= 4) throw { locked: 30, message: "Zu viele Versuche." };
@@ -452,8 +505,9 @@ const handlers = {
   connect_link: () => ({ link: `https://${location.host}/#pin=${"ab".repeat(32)}` }),
 };
 let fails = 0;
+let left = [];
 function full(x) {
-  return { id: x.id, unit_id: x.unit_id, kind: x.kind, prompt: x.prompt, options: x.options, answer: x.answer, why: x.why, groups: x.groups, spots: x.spots, figure_id: x.figure_id, hidden: x.hidden, mine: true, shared: !!db.courses[0]?.shared };
+  return { id: x.id, unit_id: x.unit_id, kind: x.kind, prompt: x.prompt, options: x.options, answer: x.answer, why: x.why, groups: x.groups, spots: x.spots, figure_id: x.figure_id, hidden: x.hidden, marked: !!x.marked, mine: true, shared: !!db.courses[0]?.shared };
 }
 function storeFigures(documentId, figures) {
   let n = 0;
@@ -482,6 +536,14 @@ window.__TAURI__ = {
       if (!handlers[cmd]) throw `Unbekannter Befehl: ${cmd}`;
       return structuredClone((await handlers[cmd]({ ...args, onToken })) ?? null);
     },
+  },
+  // Lern-Erinnerung: wie tauri-plugin-notification (nur Ausgabe in der Konsole)
+  notification: {
+    isPermissionGranted: async () => true,
+    requestPermission: async () => "granted",
+    sendNotification: (n) => console.info("[Benachrichtigung]", n),
+    cancel: async () => {},
+    Schedule: { at: (date, repeating = false, allowWhileIdle = false) => ({ at: { date, repeating, allowWhileIdle } }) },
   },
   event: {
     async listen(ev, fn) {

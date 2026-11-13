@@ -33,6 +33,23 @@ fn clean(page: &str) -> String {
         .join("\n")
 }
 
+/// Trennt im Abschnittstext die Seiten. `clean` lässt innerhalb einer Seite keine Leerzeile übrig, also ist sie eindeutig.
+const PAGE_BREAK: &str = "\n\n";
+
+/// Seiten eines Abschnitts (aus `sections`).
+pub fn pages_of(text: &str) -> Vec<&str> {
+    text.split(PAGE_BREAK).filter(|p| !p.trim().is_empty()).collect()
+}
+
+/// Lerntext eines Abschnitts: ohne die Seiten, die die Analyse als nur organisatorisch markiert hat (`units.orga`).
+pub fn learn_text(source: &str, orga: Option<&str>) -> String {
+    let skip: HashSet<usize> = orga.and_then(|o| serde_json::from_str(o).ok()).unwrap_or_default();
+    if skip.is_empty() {
+        return source.to_string();
+    }
+    pages_of(source).into_iter().enumerate().filter(|(i, _)| !skip.contains(i)).map(|(_, p)| p).collect::<Vec<_>>().join(PAGE_BREAK)
+}
+
 /// Teilt Seiten (1-basiert) an Seitengrenzen in Abschnitte ≤ `max` Zeichen; zu lange Seiten werden an Wortgrenzen geteilt.
 pub fn sections(pages: &[String], max: usize) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
@@ -45,8 +62,8 @@ pub fn sections(pages: &[String], max: usize) -> Vec<Section> {
         }
         for piece in split_long(&text, max) {
             match cur.as_mut() {
-                Some(s) if s.text.len() + piece.len() < max => {
-                    s.text.push('\n');
+                Some(s) if s.text.len() + piece.len() + 2 <= max => {
+                    s.text.push_str(PAGE_BREAK);
                     s.text.push_str(&piece);
                     s.to = page;
                 }
@@ -62,7 +79,7 @@ pub fn sections(pages: &[String], max: usize) -> Vec<Section> {
     if out.len() > 1 && out.last().map(|s| s.text.len() < 400).unwrap_or(false) {
         let last = out.pop().unwrap();
         let prev = out.last_mut().unwrap();
-        prev.text.push('\n');
+        prev.text.push_str(PAGE_BREAK);
         prev.text.push_str(&last.text);
         prev.to = last.to;
     }
@@ -144,11 +161,26 @@ pub fn dedupe_pages(pages: &[String]) -> (Vec<String>, usize) {
 
 // ---------- KI-Ausgabe-Formate ----------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct UnitInfo {
+    /// Einstufung jeder Seite (nur mit Filter); daraus `orga`
+    #[serde(default)]
+    seiten: Vec<Seite>,
+    /// Seitennummern (1-basiert) nur mit Organisatorischem
+    #[serde(skip)]
+    pub orga: Vec<usize>,
+    /// Was laut Material in der Prüfung drankommt (Vorschlag für die Schwerpunkte)
+    #[serde(default)]
+    pub klausur: String,
     pub title: String,
     pub summary: String,
     pub terms: Vec<Term>,
+}
+
+#[derive(Deserialize, Default)]
+struct Seite {
+    seite: usize,
+    art: String,
 }
 
 #[derive(Deserialize)]
@@ -184,13 +216,6 @@ struct Tasks {
     tasks: Vec<Question>,
 }
 
-const UNIT_SCHEMA: &str = r#"{"type":"object","properties":{
- "title":{"type":"string"},
- "summary":{"type":"string"},
- "terms":{"type":"array","minItems":2,"maxItems":6,"items":{"type":"object","properties":{
-   "term":{"type":"string"},"definition":{"type":"string"}},"required":["term","definition"]}}},
- "required":["title","summary","terms"]}"#;
-
 const QUESTION_SCHEMA: &str = r#"{"type":"object","properties":{
  "questions":{"type":"array","minItems":5,"maxItems":8,"items":{"type":"object","properties":{
    "kind":{"enum":["mc","true_false","fill_blank"]},
@@ -219,33 +244,117 @@ fn grammar(cell: &'static OnceLock<String>, schema: &str) -> &'static str {
 
 const SYSTEM: &str = "Du bist ein geduldiger Tutor. Du arbeitest ausschließlich mit dem gegebenen Lernmaterial und antwortest auf Deutsch.";
 
-pub fn analyze(ai: &Ai, text: &str) -> Result<UnitInfo, AiError> {
-    static G: OnceLock<String> = OnceLock::new();
+/// Titel, Zusammenfassung und Begriffe eines Abschnitts. Mit `filter` markiert die KI zuerst die Seiten,
+/// auf denen nur Organisatorisches steht (Termine, Klausur, Dozent …), und notiert Hinweise zur Prüfung.
+/// Das Schema steht als Text da, damit `orga` vor dem Rest kommt: erst entscheiden, dann zusammenfassen.
+pub fn analyze(ai: &Ai, course: &str, text: &str, filter: bool) -> Result<UnitInfo, AiError> {
+    let pages = pages_of(text);
+    let n = pages.len().max(1);
+    let material = pages.iter().enumerate().map(|(i, p)| format!("### {}\n{p}", i + 1)).collect::<Vec<_>>().join("\n\n");
+    // Jede Seite einzeln einstufen statt „nenne die Orga-Seiten“: Eine Liste lässt ein kleines Modell zu gern leer.
+    let orga_rule = if filter {
+        "- seiten: für JEDE Seite art = \"orga\", wenn auf ihr NUR Organisatorisches steht: Termine, Ablauf und Form der Klausur oder Prüfung, \
+             Dozent, Kontakt, Sprechstunde, Literaturliste, Gliederung oder Agenda, Lernplattform, Bewertung. \
+             Sonst art = \"inhalt\" (jede Seite mit Fachinhalt, auch wenn dort zusätzlich Organisatorisches steht).\n"
+    } else {
+        ""
+    };
+    let schema = unit_schema(n, filter);
     let user = format!(
-        "Lernmaterial:\n<<<\n{text}\n>>>\n\n\
-         Gib zurück:\n\
-         - title: kurzer Thementitel (höchstens 6 Wörter)\n\
-         - summary: 2–3 einfache Sätze, worum es in diesem Material geht\n\
-         - terms: die 3–6 wichtigsten Fachbegriffe aus dem Material, je mit einer kurzen Definition in einem Satz"
+        "Kurs: {course}\nLernmaterial (nummerierte Seiten):\n<<<\n{material}\n>>>\n\n\
+         Gib zurück:\n{orga_rule}\
+         - klausur: Steht im Material, was in der Prüfung drankommt (Themen, Schwerpunkte, Kapitel)? Dann das kurz mit den Worten des Materials, sonst \"\".\n\
+         - title: kurzer Thementitel des Lerninhalts (höchstens 6 Wörter)\n\
+         - summary: 2–3 einfache Sätze, worum es fachlich geht\n\
+         - terms: die 3–6 wichtigsten Fachbegriffe, je mit einer kurzen Definition in einem Satz. Nichts Organisatorisches."
     );
+    let g = llama_cpp_2::json_schema_to_grammar(&schema).map_err(|e| AiError::Failed(format!("Grammatik: {e}")))?;
     let raw = ai.generate(
-        Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(grammar(&G, UNIT_SCHEMA)), max_tokens: 600, temperature: 0.3 },
+        Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(&g), max_tokens: 800 + 12 * n, temperature: 0.3 },
         |_| {},
     )?;
-    serde_json::from_str(&raw).map_err(|e| AiError::Failed(format!("Antwort unlesbar: {e}")))
+    let mut info: UnitInfo = serde_json::from_str(&raw).map_err(|e| AiError::Failed(format!("Antwort unlesbar: {e}")))?;
+    info.orga = info.seiten.iter().filter(|s| s.art == "orga" && (1..=n).contains(&s.seite)).map(|s| s.seite).collect();
+    info.orga.sort_unstable();
+    info.orga.dedup();
+    info.klausur = if hint_grounded(&info.klausur, text) { info.klausur.trim().chars().take(200).collect() } else { String::new() };
+    Ok(info)
 }
 
-pub fn generate_questions(ai: &Ai, text: &str, level: i64) -> Result<Vec<Question>, AiError> {
+/// Schema der Analyse für `n` Seiten; mit `filter` zuerst `seiten`: je Seite (Nummer fest vorgegeben) „inhalt“ oder „orga“.
+fn unit_schema(n: usize, filter: bool) -> String {
+    let page = |i: usize| format!(r#"{{"type":"object","properties":{{"seite":{{"const":{i}}},"art":{{"enum":["inhalt","orga"]}}}},"required":["seite","art"]}}"#);
+    let items = (1..=n).map(page).collect::<Vec<_>>().join(",");
+    let (orga, req) =
+        if filter { (format!(r#""seiten":{{"type":"array","prefixItems":[{items}],"minItems":{n},"maxItems":{n}}},"#), r#""seiten","#) } else { (String::new(), "") };
+    format!(
+        r#"{{"type":"object","properties":{{{orga}"klausur":{{"type":"string","maxLength":200}},"title":{{"type":"string"}},"summary":{{"type":"string"}},
+ "terms":{{"type":"array","minItems":2,"maxItems":6,"items":{{"type":"object","properties":{{"term":{{"type":"string"}},"definition":{{"type":"string"}}}},"required":["term","definition"]}}}}}},
+ "required":[{req}"klausur","title","summary","terms"]}}"#
+    )
+}
+
+/// Der Klausur-Hinweis muss aus dem Material stammen: mindestens 60 % seiner Wörter (ab 4 Zeichen) stehen im Abschnitt.
+fn hint_grounded(hint: &str, text: &str) -> bool {
+    let hay = normalize(text);
+    let ws: Vec<String> = words(&normalize(hint)).into_iter().filter(|w| w.chars().count() >= 4).collect();
+    !ws.is_empty() && ws.iter().filter(|w| hay.contains(w.as_str())).count() * 10 >= ws.len() * 6
+}
+
+/// Prüfungsschwerpunkte des Kurses als Themenliste: eine Zeile (oder durch ; oder • getrennt) je Thema, ohne Nummern.
+pub fn exam_topics(focus: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    focus
+        .split(['\n', ';', '•'])
+        .map(|t| strip_number(t).trim_start_matches('*').trim().chars().take(150).collect::<String>())
+        .filter(|t| t.chars().any(char::is_alphabetic) && seen.insert(normalize(t)))
+        .take(30)
+        .collect()
+}
+
+/// Welche Prüfungsthemen behandelt diese Einheit? Kurze Eingabe (Titel, Zusammenfassung, Begriffe, Anfang), damit es auch auf dem Handy schnell geht.
+pub fn match_topics(ai: &Ai, topics: &[String], info: &str) -> Result<Vec<String>, AiError> {
+    if topics.is_empty() {
+        return Ok(vec![]);
+    }
+    #[derive(Deserialize)]
+    struct R {
+        topics: Vec<String>,
+    }
+    let most = topics.len().min(6);
+    let schema = json!({"type": "object", "required": ["topics"], "properties": {"topics": {"type": "array", "maxItems": most, "items": {"enum": topics}}}});
+    let list = topics.iter().map(|t| format!("- {t}")).collect::<Vec<_>>().join("\n");
+    let user = format!(
+        "Abschnitt eines Kurses:\n<<<\n{info}\n>>>\n\nPrüfungsthemen:\n{list}\n\n\
+         Welche dieser Prüfungsthemen behandelt der Abschnitt fachlich? Nur Themen, um die es hier wirklich geht. Leere Liste, wenn keins passt."
+    );
+    let r: R = ask_json(ai, user, &schema, 40 + 60 * most)?;
+    let mut seen = HashSet::new();
+    Ok(r.topics.into_iter().filter(|t| seen.insert(t.clone())).collect())
+}
+
+/// Zusatz für die Prompts, wenn die Einheit zu den Prüfungsthemen gehört.
+fn exam_line(topics: &[String]) -> String {
+    if topics.is_empty() {
+        String::new()
+    } else {
+        format!("\nPrüfungsschwerpunkt: {}. Stelle die meisten Aufgaben dazu, soweit das Material es behandelt.", topics.join("; "))
+    }
+}
+
+pub fn generate_questions(ai: &Ai, text: &str, level: i64, topics: &[String]) -> Result<Vec<Question>, AiError> {
     static G: OnceLock<String> = OnceLock::new();
     let focus = focus(level);
+    let exam = exam_line(topics);
     let user = format!(
         "Lernmaterial:\n<<<\n{text}\n>>>\n\n\
-         Erstelle 8 Übungsfragen zu diesem Material. Schwerpunkt: {focus}.\n\
+         Erstelle 8 Übungsfragen zu diesem Material. Schwerpunkt: {focus}.{exam}\n\
          Verteilung: 4 Fragen vom Typ mc, 2 vom Typ true_false, 2 vom Typ fill_blank.\n\
          - mc: Frage mit genau 4 Antwortoptionen, genau eine ist richtig. answer = exakter Text der richtigen Option. Falsche Optionen klingen plausibel.\n\
          - true_false: eine Aussage, die stimmt oder nicht stimmt. options = [\"Richtig\", \"Falsch\"], answer = \"Richtig\" oder \"Falsch\".\n\
          - fill_blank: ein Satz mit genau einer Lücke ___ für einen Fachbegriff. answer = das fehlende Wort, options = answer plus 3 ähnliche falsche Wörter.\n\
          Regeln: Jede Frage prüft genau einen Punkt. why = ein kurzer Satz, warum die Antwort stimmt. \
+         Nur Fragen zum fachlichen Inhalt, nichts Organisatorisches (Termine, Klausur, Dozenten, Literatur). \
          Keine Verweise auf Seiten, Kapitel, Folien oder das Skript."
     );
     let raw = ai.generate(
@@ -265,7 +374,7 @@ fn focus(level: i64) -> &'static str {
 }
 
 /// 1–2 Aufgaben, deren Art die KI nach dem Inhalt wählt. Eine Matrix nur, wenn ihre Felder im Material stehen.
-pub fn generate_tasks(ai: &Ai, text: &str, level: i64) -> Result<Vec<Question>, AiError> {
+pub fn generate_tasks(ai: &Ai, text: &str, level: i64, topics: &[String]) -> Result<Vec<Question>, AiError> {
     static G: OnceLock<String> = OnceLock::new();
     let scenario = if level >= 2 {
         "\nBei sort: Wende die Kategorien auf ein neues, konkretes Beispiel an (etwa ein Café, ein Fahrradladen oder eine App). \
@@ -276,7 +385,7 @@ pub fn generate_tasks(ai: &Ai, text: &str, level: i64) -> Result<Vec<Question>, 
     };
     let user = format!(
         "Lernmaterial:\n<<<\n{text}\n>>>\n\n\
-         Erstelle 2 Übungsaufgaben verschiedener Art, die zur Struktur dieses Materials passen. Schwerpunkt: {}.\n\
+         Erstelle 2 Übungsaufgaben verschiedener Art, die zur Struktur dieses Materials passen. Schwerpunkt: {}.{}\n\
          Teilt das Material Dinge in feste Kategorien ein, ist eine davon sort. Beschreibt es einen Ablauf, ist eine davon order.\n\
          - sort: NUR wenn das Material selbst Dinge in feste Kategorien einteilt (z. B. SWOT-Analyse: Stärken, Schwächen, Chancen, Risiken). \
          groups = 2 bis 4 Kategorien, name genau wie im Material, items = je 1 bis 3 kurze Aussagen (höchstens 8 Wörter). \
@@ -285,8 +394,9 @@ pub fn generate_tasks(ai: &Ai, text: &str, level: i64) -> Result<Vec<Question>, 
          je höchstens 8 Wörter, ohne Nummern. groups = [].\n\
          - cloze: sonst. prompt = 1 bis 3 Sätze zum Inhalt, in denen 2 bis 4 Fachbegriffe in eckigen Klammern stehen, \
          z. B. „Die [Nachfrage] sinkt, wenn der [Preis] steigt.“ options = 2 bis 3 ähnliche, aber falsche Begriffe. groups = [].{scenario}\n\
-         why = ein kurzer Satz, worauf es ankommt. Keine Verweise auf Seiten, Kapitel, Folien oder das Skript.",
-        focus(level)
+         why = ein kurzer Satz, worauf es ankommt. Nur fachlicher Inhalt, nichts Organisatorisches. Keine Verweise auf Seiten, Kapitel, Folien oder das Skript.",
+        focus(level),
+        exam_line(topics)
     );
     let raw = ai.generate(
         Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(grammar(&G, TASK_SCHEMA)), max_tokens: 900, temperature: 0.4 },
@@ -404,7 +514,11 @@ pub fn recheck(ai: &Ai, text: &str, q: Question) -> Result<Option<Question>, AiE
 
 // ---------- Qualitätsfilter im Code statt langer Prompt-Regeln ----------
 
-const BANNED_WORDS: [&str; 6] = ["seite", "seiten", "kapitel", "skript", "folie", "folien"];
+/// Seitenverweise und Organisatorisches. „prüfung“ fehlt bewusst: in manchen Fächern ist es ein Fachbegriff.
+const BANNED_WORDS: [&str; 18] = [
+    "seite", "seiten", "kapitel", "skript", "folie", "folien", "klausur", "klausuren", "dozent", "dozentin", "dozenten", "sprechstunde", "vorlesung",
+    "vorlesungen", "tutorium", "ects", "moodle", "ilias",
+];
 const ASKS: [&str; 10] = ["was", "welche", "welcher", "wie", "warum", "wer", "wo", "wann", "nenne", "erkläre"];
 
 fn words(s: &str) -> Vec<String> {
@@ -580,6 +694,7 @@ pub fn spawn_worker(db: Db, ai: Arc<Ai>, wake: Receiver<()>, notify: impl Fn(i64
         let started = std::time::Instant::now();
         let what = match &task {
             Task::Analyze { unit_id, .. } => format!("Analyse Einheit {unit_id}"),
+            Task::Focus { unit_id, .. } => format!("Prüfungsthemen Einheit {unit_id}"),
             Task::Questions { unit_id, level, .. } => format!("Fragen Einheit {unit_id} (Stufe {level})"),
             Task::Recheck { unit_id, .. } => format!("Prüfung Einheit {unit_id}"),
         };
@@ -602,18 +717,22 @@ pub fn spawn_worker(db: Db, ai: Arc<Ai>, wake: Receiver<()>, notify: impl Fn(i64
 
 fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, AiError> {
     match task {
-        Task::Analyze { unit_id, course_id, idx, page_from, page_to, text } => {
-            let info = match analyze(ai, &text) {
+        Task::Analyze { unit_id, course_id, idx, page_from, page_to, text, course, filter } => {
+            let info = match analyze(ai, &course, &text, filter) {
                 Ok(i) => i,
                 Err(AiError::NotReady) => return Err(AiError::NotReady),
-                // Analyse kaputt → Einheit trotzdem nutzbar machen (Fragen kommen aus dem Text)
+                // Analyse kaputt → Einheit trotzdem nutzbar machen (Fragen kommen aus dem Text), nichts aussortieren
                 Err(AiError::Failed(e)) => {
                     eprintln!("[import] Analyse Einheit {unit_id}: {e}");
-                    UnitInfo { title: format!("Seiten {page_from}-{page_to}"), summary: String::new(), terms: vec![] }
+                    UnitInfo { title: format!("Seiten {page_from}-{page_to}"), ..Default::default() }
                 }
             };
+            let pages = pages_of(&text).len();
+            // Nur Organisatorisches: keine Einheit zum Lernen, aber sichtbar und mit „Doch lernen“ zurückzuholen.
+            let only_orga = filter && pages > 0 && info.orga.len() >= pages;
+            let orga = serde_json::to_string(&info.orga.iter().map(|p| p - 1).collect::<Vec<_>>()).unwrap();
             let conn = db.lock().unwrap();
-            let base = info.title.trim().trim_end_matches('.').to_string();
+            let base = if only_orga { "Organisatorisches".to_string() } else { info.title.trim().trim_end_matches('.').to_string() };
             let earlier: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM units WHERE course_id = ?1 AND idx < ?2 AND (title = ?3 OR title LIKE ?3 || ' (Teil %')",
@@ -622,12 +741,16 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
                 )
                 .unwrap_or(0);
             let title = if earlier > 0 { format!("{base} (Teil {})", earlier + 1) } else { base };
+            // Neu analysiert = neuer Text: Prüfungsthemen neu prüfen (exam NULL). orga NULL (Nutzer will alles) bleibt NULL.
             let _ = conn.execute(
-                "UPDATE units SET title = ?1, summary = ?2, status = 'ready' WHERE id = ?3",
-                params![title, info.summary.trim(), unit_id],
+                "UPDATE units SET title = ?1, summary = ?2, status = ?3, orga = CASE WHEN orga IS NULL THEN NULL ELSE ?4 END, exam_hint = ?5, exam = NULL WHERE id = ?6",
+                params![title, info.summary.trim(), if only_orga { "orga" } else { "ready" }, orga, info.klausur, unit_id],
             );
             // Nach dem Ersetzen wird neu analysiert: alte Begriffe raus, sonst doppeln sie sich.
             let _ = conn.execute("DELETE FROM terms WHERE unit_id = ?1", [unit_id]);
+            if only_orga {
+                return Ok(course_id);
+            }
             for t in info.terms.iter().filter(|t| !t.term.trim().is_empty()) {
                 let _ = conn.execute(
                     "INSERT INTO terms(unit_id, term, definition) VALUES(?1, ?2, ?3)",
@@ -636,13 +759,32 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
             }
             // Die ersten 2 Einheiten eines Kurses bekommen sofort Fragen.
             let _ = conn.execute(
-                "UPDATE units SET q_state = 1 WHERE id = ?1 AND q_state = 0 AND (SELECT COUNT(*) FROM units WHERE course_id = ?2 AND q_state > 0) < 2",
+                "UPDATE units SET q_state = 1 WHERE id = ?1 AND q_state = 0 AND (SELECT COUNT(*) FROM units WHERE course_id = ?2 AND q_state > 0 AND status != 'orga') < 2",
                 params![unit_id, course_id],
             );
             Ok(course_id)
         }
-        Task::Questions { unit_id, level, text } => {
-            let result = generate_questions(ai, &text, level);
+        Task::Focus { unit_id, topics, info } => {
+            let found = match match_topics(ai, &topics, &info) {
+                Ok(t) => t,
+                Err(AiError::NotReady) => return Err(AiError::NotReady),
+                // Im Zweifel nicht relevant, sonst hinge der Worker an dieser Einheit
+                Err(AiError::Failed(e)) => {
+                    eprintln!("[import] Prüfungsthemen Einheit {unit_id}: {e}");
+                    vec![]
+                }
+            };
+            let conn = db.lock().unwrap();
+            let course_id: i64 = conn.query_row("SELECT course_id FROM units WHERE id = ?1", [unit_id], |r| r.get(0)).unwrap_or(0);
+            let _ = conn.execute("UPDATE units SET exam = ?1 WHERE id = ?2", params![serde_json::to_string(&found).unwrap(), unit_id]);
+            // Prüfungsrelevant → Fragen schon vorab schreiben lassen
+            if !found.is_empty() {
+                let _ = conn.execute("UPDATE units SET q_state = 1 WHERE id = ?1 AND q_state = 0", [unit_id]);
+            }
+            Ok(course_id)
+        }
+        Task::Questions { unit_id, level, text, topics } => {
+            let result = generate_questions(ai, &text, level, &topics);
             let course_id = {
                 let conn = db.lock().unwrap();
                 let course_id: i64 = conn.query_row("SELECT course_id FROM units WHERE id = ?1", [unit_id], |r| r.get(0)).unwrap_or(0);
@@ -668,7 +810,7 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
             // Die Lektion kann schon starten; Strukturaufgaben kommen ohne Datenbank-Sperre hinterher.
             notify(course_id);
             let mut tasks = Vec::new();
-            match generate_tasks(ai, &text, level) {
+            match generate_tasks(ai, &text, level, &topics) {
                 Ok(ts) => {
                     for t in ts {
                         let prompt = t.prompt.clone();
@@ -1019,18 +1161,23 @@ mod tests {
         let ai = Ai::new(dir, &tier, Box::new(|_| {}));
         ai.ensure_model();
         let text = include_str!("../testdata/marktformen.txt");
-        let secs = sections(&[text.to_string()], SECTION_CHARS);
+        // Vorne eine Orga-Folie: die Analyse soll sie als Seite 1 aussortieren und den Klausur-Hinweis notieren.
+        let orga = "Organisatorisches\nVorlesung: Prof. Dr. Muster, Sprechstunde Mi 10-11 Uhr, Raum B 204\n\
+                    Klausur: 90 Minuten am 14.02., klausurrelevant sind Marktformen und Preisbildung\nLiteratur: Mankiw, Grundzüge der VWL";
+        let secs = sections(&[orga.to_string(), text.to_string()], SECTION_CHARS);
         println!("{} Abschnitt(e), Modell {tier}", secs.len());
 
         let t = std::time::Instant::now();
-        let info = analyze(&ai, &secs[0].text).expect("Analyse");
-        println!("\nAnalyse in {:.1} s\n  Titel: {}\n  Zusammenfassung: {}", t.elapsed().as_secs_f32(), info.title, info.summary);
+        let info = analyze(&ai, "Mikroökonomie", &secs[0].text, true).expect("Analyse");
+        println!("\nAnalyse in {:.1} s\n  Orga-Seiten: {:?}\n  Klausur: {}\n  Titel: {}\n  Zusammenfassung: {}", t.elapsed().as_secs_f32(), info.orga, info.klausur, info.title, info.summary);
+        assert_eq!(info.orga, vec![1], "Orga-Folie nicht erkannt");
+        let secs = vec![Section { text: learn_text(&secs[0].text, Some("[0]")), ..secs.into_iter().next().unwrap() }];
         for term in &info.terms {
             println!("  - {}: {}", term.term, term.definition);
         }
 
         let t = std::time::Instant::now();
-        let qs = generate_questions(&ai, &secs[0].text, 1).expect("Fragen");
+        let qs = generate_questions(&ai, &secs[0].text, 1, &["Preisbildung im Monopol".to_string()]).expect("Fragen");
         println!("\nFragen in {:.1} s ({} gültig)", t.elapsed().as_secs_f32(), qs.len());
         for q in &qs {
             println!("  [{}] {}\n      {:?} -> {}\n      warum: {}", q.kind, q.prompt, q.options, q.answer, q.why);
@@ -1046,7 +1193,7 @@ mod tests {
         // Strukturaufgaben mit Selbstprüfung: SWOT-Text soll eine Matrix ergeben, Marktformen keine erfundene.
         for (name, text, level) in [("swot", include_str!("../testdata/swot.txt"), 1), ("swot", include_str!("../testdata/swot.txt"), 2), ("marktformen", text, 1)] {
             let t = std::time::Instant::now();
-            let tasks = generate_tasks(&ai, text, level).expect("Strukturaufgaben");
+            let tasks = generate_tasks(&ai, text, level, &[]).expect("Strukturaufgaben");
             println!("\nStrukturaufgaben {name} Stufe {level} in {:.1} s", t.elapsed().as_secs_f32());
             for task in tasks {
                 println!("  [{}] {}\n      {}\n      Ablenker: {:?}", task.kind, task.prompt, task.answer, task.options);
@@ -1141,6 +1288,27 @@ mod tests {
     }
 
     #[test]
+    fn orga_pages_and_exam_topics() {
+        let s = sections(&["Organisatorisches\nKlausur am 14.02.".into(), "Markt\nAngebot trifft Nachfrage".into(), "Preis\nentsteht am Markt".into()], 5000);
+        assert_eq!(s.len(), 1);
+        assert_eq!(pages_of(&s[0].text).len(), 3);
+        assert_eq!(learn_text(&s[0].text, Some("[0]")), "Markt\nAngebot trifft Nachfrage\n\nPreis\nentsteht am Markt");
+        assert_eq!(learn_text(&s[0].text, None), s[0].text); // Nutzer will alles
+        assert_eq!(learn_text(&s[0].text, Some("[]")), s[0].text);
+
+        // Klausur-Hinweis nur, wenn er aus dem Material stammt
+        assert!(hint_grounded("Klausurrelevant: Marktformen und Preisbildung", "In der Klausur sind Marktformen und Preisbildung klausurrelevant."));
+        assert!(!hint_grounded("Kapitel 7 Spieltheorie und Auktionen", "In der Klausur sind Marktformen und Preisbildung klausurrelevant."));
+
+        assert_eq!(exam_topics("1. Marktformen\n- Preisbildung im Monopol; Elastizität\n\n• marktformen\n42"), vec!["Marktformen", "Preisbildung im Monopol", "Elastizität"]);
+
+        // Beide Schema-Varianten lassen sich in eine Grammatik übersetzen (maxLength, Enum der Seiten)
+        for filter in [true, false] {
+            llama_cpp_2::json_schema_to_grammar(&unit_schema(3, filter)).expect("Grammatik");
+        }
+    }
+
+    #[test]
     fn filters_bad_questions() {
         let qs = vec![
             q("mc", "Was beschreibt die Nachfrage?", &["A", "B", "C", "d"], "D"),          // ok, Antwort wird zu "d"
@@ -1151,6 +1319,7 @@ mod tests {
             q("fill_blank", "Ein ____ speichert Daten.", &["Puffer", "Register"], "Speicher"), // ok, Antwort ergänzt
             q("fill_blank", "Ohne Lücke im Satz.", &["A", "B"], "A"),                        // keine Lücke
             q("mc", "Was beschreibt die Nachfrage?", &["A", "B", "C", "D"], "A"),           // Duplikat
+            q("mc", "Wann findet die Klausur statt?", &["A", "B", "C", "D"], "A"),          // Organisatorisches
         ];
         let out = validate(qs);
         assert_eq!(out.len(), 3, "{out:#?}");

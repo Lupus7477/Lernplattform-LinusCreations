@@ -2,10 +2,11 @@
 import { call } from "./api.js";
 import { confirmSheet, flip, fmtDate, h, icon, openSheet, segmented, toast } from "./ui.js";
 import { aiNotice, currentCourse, emit, loadCourses, selectCourse, state, subscribe } from "./state.js";
+import { fail } from "./report.js";
 
 let pdfjs;
-/** Liest Text und Grafiken zum Beschriften. Eine Seite ohne erkennbare Grafik kostet nur das Operator-Lesen. */
-async function readPdf(file, onPage) {
+/** Liest Text und Grafiken zum Beschriften. Eine Seite ohne erkennbare Grafik kostet nur das Operator-Lesen. `withFigures: false` = nur Text. */
+async function readPdf(file, onPage, { withFigures = true } = {}) {
   pdfjs ??= await import("../vendor/pdf.min.mjs").then((m) => {
     m.GlobalWorkerOptions.workerSrc = new URL("../vendor/pdf.worker.min.mjs", import.meta.url).href;
     return m;
@@ -18,7 +19,7 @@ async function readPdf(file, onPage) {
     const page = await doc.getPage(n);
     const content = await page.getTextContent();
     pages.push(content.items.map((it) => (it.str ?? "") + (it.hasEOL ? "\n" : " ")).join(""));
-    if (figures.length < FIG.maxFigures) {
+    if (withFigures && figures.length < FIG.maxFigures) {
       try {
         const f = await findFigure(page, content);
         if (f) figures.push({ page: n, ...f });
@@ -306,15 +307,54 @@ function content(page) {
     h("div.card", pick ? h("div.field", h("label", { for: "course-pick" }, "Kurs"), pick) : h("h2", "Neuer Kurs"), newFields, drop, status),
     state.courses.length ? h("h2", "Deine Kurse") : null,
     ...state.courses.map((c) => courseCard(c, page)),
+    state.session?.mode === "server" ? leftCourses() : null,
   ].filter(Boolean);
 }
 
 const skippedNote = (r) => (r.skipped ? ` ${r.skipped} doppelte ${r.skipped === 1 ? "Seite" : "Seiten"} übersprungen.` : "");
-const fail = (e) => toast(String(e?.message || e));
 async function refresh() {
   await loadCourses();
   emit("courses");
   emit("course-updated", null);
+}
+
+/** Verlassene Kurse, die weiter für alle geteilt sind: wieder anzeigen. Erscheint nur, wenn es welche gibt. */
+function leftCourses() {
+  const box = h("div");
+  call("left_courses")
+    .then((list) => {
+      if (!list.length) return;
+      const rows = list.map((c) =>
+        h(
+          "div.list-row",
+          h("div", h("b", c.name)),
+          h("button.btn.ghost", { type: "button", onclick: () => call("rejoin_course", { courseId: c.id }).then(refresh).then(() => toast(`„${c.name}“ ist wieder da.`)).catch(fail) }, "Wieder anzeigen"),
+        ),
+      );
+      box.replaceChildren(h("details.card.q-box", h("summary", h("h2", `${list.length} ausgeblendete${list.length === 1 ? "r Kurs" : " Kurse"}`), icon("caret-down")), ...rows));
+    })
+    .catch(() => {});
+  return box;
+}
+
+/** Geteilten Kurs verlassen: verschwindet nur bei mir, mein Fortschritt bleibt für den Fall, dass ich zurückkomme. */
+async function leaveCourse(c) {
+  const ok = await confirmSheet({
+    title: `„${c.name}“ verlassen?`,
+    text: c.share_all
+      ? "Der Kurs verschwindet bei dir. Dein Fortschritt bleibt gespeichert: Unter „Ausgeblendete Kurse“ holst du ihn jederzeit zurück."
+      : `Der Kurs verschwindet bei dir. Dein Fortschritt bleibt gespeichert, falls ${c.owner} dich wieder einlädt.`,
+    confirm: "Verlassen",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await call("leave_course", { courseId: c.id });
+  } catch (e) {
+    return fail(e);
+  }
+  await refresh();
+  toast(`„${c.name}“ verlassen.`);
 }
 
 function courseCard(c) {
@@ -341,11 +381,15 @@ function courseCard(c) {
       h("h3", c.name, badge),
       c.mine
         ? h("button.btn.ghost", { type: "button", onclick: () => editCourse(c) }, icon("pencil-simple"), "Bearbeiten")
-        : c.can_invite
-          ? h("button.btn.ghost", { type: "button", onclick: () => inviteSheet(c) }, icon("users"), "Personen hinzufügen")
-          : null,
+        : h(
+            "div.row",
+            { style: { gap: "0", "flex-wrap": "wrap", "justify-content": "end" } },
+            c.can_invite ? h("button.btn.ghost", { type: "button", onclick: () => inviteSheet(c) }, icon("users"), "Personen hinzufügen") : null,
+            h("button.btn.ghost", { type: "button", onclick: () => leaveCourse(c) }, icon("sign-out"), "Verlassen"),
+          ),
     ),
     c.exam_date ? h("p.muted", `Prüfung am ${fmtDate(c.exam_date)}`) : null,
+    c.exam_focus ? h("p.muted", icon("target"), ` Prüfungsschwerpunkte: ${c.exam_focus.split(/\n+/).length} ${c.exam_focus.split(/\n+/).length === 1 ? "Eintrag" : "Einträge"}`) : null,
     c.mine && n > 1 ? sortable(h("div.docs", c.documents.map(doc)), (ids, id, keyboard) => reorder(c, ids, id, keyboard)) : h("div.docs", c.documents.map(doc)),
     c.mine && n > 1 ? h("p.hint", "In dieser Reihenfolge kommen die PDFs im Lernpfad.") : null,
     h("div.bar", h("i", { style: { "--p": String(c.units ? c.ready / c.units : 0) } })),
@@ -518,9 +562,61 @@ const SHARE_HINT = {
   all: "Alle Konten auf diesem Server können mit diesem Kurs lernen und Fragen verbessern. Dein Fortschritt bleibt deiner.",
 };
 
+/**
+ * Prüfungsschwerpunkte: eigener Text (Stoffplan, Lernziele, Altklausur), aus einem PDF übernehmen
+ * oder Vorschläge der KI aus den Orga-Folien antippen. Nichts wird automatisch gesetzt.
+ */
+function focusField(c) {
+  const area = h("textarea.input", { id: "edit-focus", rows: 5, maxlength: 4000, value: c.exam_focus || "", placeholder: "z. B.\nMarktformen\nPreisbildung im Monopol\nElastizität der Nachfrage" });
+  const add = (text) => {
+    const cur = area.value.trim();
+    area.value = (cur ? `${cur}\n${text.trim()}` : text.trim()).slice(0, 4000);
+  };
+  const file = h("input", { type: "file", accept: "application/pdf,.pdf", hidden: true });
+  const fromPdf = h("button.btn.ghost", { type: "button", onclick: () => file.click() }, icon("file-pdf"), "Aus PDF übernehmen");
+  file.addEventListener("change", async () => {
+    const f = file.files[0];
+    file.value = "";
+    if (!f) return;
+    fromPdf.disabled = true;
+    try {
+      const { pages } = await readPdf(f, () => {}, { withFigures: false });
+      const text = pages.map((p) => p.split("\n").map((l) => l.trim()).filter(Boolean).join("\n")).join("\n").trim();
+      if (!text) throw "In diesem PDF wurde kein Text gefunden. Ist es eingescannt?";
+      add(text);
+      toast(text.length > 4000 ? "Übernommen, aber gekürzt: Es passen 4000 Zeichen. Streich am besten, was nicht drankommt." : "Übernommen. Streich, was nicht drankommt.");
+    } catch (e) {
+      fail(e);
+    }
+    fromPdf.disabled = false;
+  });
+  const hints = (c.exam_hints || []).map((x) => {
+    const chip = h("button.hint-chip", { type: "button", "aria-pressed": "false" }, icon("plus-circle"), h("span", x));
+    chip.addEventListener("click", () => {
+      if (chip.getAttribute("aria-pressed") === "true") return;
+      add(x);
+      chip.setAttribute("aria-pressed", "true");
+      chip.querySelector("use").setAttribute("href", "#i-check");
+    });
+    return chip;
+  });
+  return {
+    el: h(
+      "div.field",
+      h("label", { for: "edit-focus" }, "Prüfungsschwerpunkte"),
+      area,
+      h("span.hint", "Ein Thema pro Zeile, z. B. aus dem Stoffplan, den Lernzielen oder einer Altklausur. Fragen und Erklärungen richten sich danach."),
+      h("div.row", fromPdf, file),
+      hints.length ? h("div.stack", { style: { gap: "8px" } }, h("span.hint", "Vorschläge aus deinen Folien (zum Übernehmen antippen):"), h("div.hint-chips", hints)) : null,
+    ),
+    value: () => area.value.trim(),
+  };
+}
+
 function editCourse(c) {
   const name = h("input.input", { id: "edit-name", value: c.name, autocomplete: "off" });
   const date = h("input.input", { id: "edit-date", type: "date", value: c.exam_date || "" });
+  const focus = focusField(c);
   // Teilen gibt es nur auf dem eigenen Server: nur ich, ausgewählte Personen oder alle Konten.
   const onServer = state.session?.mode === "server";
   let mode = c.share_all ? "all" : c.members ? "some" : "none";
@@ -549,7 +645,7 @@ function editCourse(c) {
   const del = h("button.btn.ghost", { type: "button", style: { color: "var(--wrong)" } }, icon("trash"), "Kurs löschen");
   const s = openSheet({
     title: "Kurs bearbeiten",
-    body: [h("div.field", h("label", { for: "edit-name" }, "Name"), name), h("div.field", h("label", { for: "edit-date" }, "Prüfungsdatum"), date), share, del],
+    body: [h("div.field", h("label", { for: "edit-name" }, "Name"), name), h("div.field", h("label", { for: "edit-date" }, "Prüfungsdatum"), date), focus.el, share, del],
     foot: save,
   });
   save.addEventListener("click", async () => {
@@ -560,6 +656,7 @@ function editCourse(c) {
         id: c.id,
         name: name.value,
         examDate: date.value || null,
+        examFocus: focus.value(),
         ...(onServer ? { share: mode, members: picker?.picked(), membersInvite: picker ? invite.checked : undefined } : {}),
       });
     } catch (e) {

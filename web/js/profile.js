@@ -1,21 +1,23 @@
-// Profil: Streak, Kalender, Woche, Einstellungen, Konto/Server, KI.
+// Profil: Streak, Kalender, Woche, Einstellungen, Konto/Server, KI, Über & Version.
 import { call } from "./api.js";
 import { PASSWORD_RULES } from "./auth.js";
-import { applyTheme, confirmSheet, gb, h, icon, openSheet, pref, segmented, toast } from "./ui.js";
+import { applyTheme, confirmSheet, gb, h, icon, openExternal, openSheet, pref, segmented, toast } from "./ui.js";
 import { aiNotice, emit, loadStats, state, subscribe } from "./state.js";
+import { appInfo, fail, openReport } from "./report.js";
+import { canRemind, reminderTime, setReminder } from "./remind.js";
 
 const DOW = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
 const iso = (d) => d.toLocaleDateString("sv-SE"); // JJJJ-MM-TT in lokaler Zeit
 
 export async function render() {
   const page = h("div.page");
-  const [stats, tiers] = await Promise.all([loadStats(), call("ai_tiers")]);
+  const [stats, tiers, about] = await Promise.all([loadStats(), call("ai_tiers"), aboutCard()]);
   // Konto-Karten einmal bauen: das Neuzeichnen bei KI-Statusmeldungen soll nicht jedes Mal den Server fragen.
   const user = state.session?.user;
   const server = user
     ? [accountCard(user), devicesCard(), user.admin ? membersCard() : null]
     : window.__TAURI__ && state.session?.mode === "local" ? [connectCard()] : [];
-  const draw = () => page.replaceChildren(...content(stats, tiers, server));
+  const draw = () => page.replaceChildren(...content(stats, tiers, server), about);
   draw();
   page.cleanup = subscribe((kind) => kind === "ai" && draw());
   return page;
@@ -96,6 +98,7 @@ function settings(s) {
       h("span.hint", "Eine Lektion bringt etwa 15 bis 30 XP."),
     ),
     h("div.row.between", h("label", { for: "sound", style: { "font-weight": "700" } }, "Töne bei Antworten"), soundSwitch),
+    canRemind() ? reminder(s) : null,
     h(
       "div.field",
       h("label", "Darstellung"),
@@ -113,6 +116,56 @@ function settings(s) {
         "Darstellung",
       ),
     ),
+  );
+}
+
+/** Tägliche Erinnerung: Schalter + Uhrzeit. Nur in den Apps (Benachrichtigungen). */
+function reminder(stats) {
+  const on = h("input.switch", { type: "checkbox", id: "remind", checked: !!reminderTime() });
+  const time = h("input.input", { type: "time", id: "remind-time", value: reminderTime() || "18:00", "aria-label": "Uhrzeit der Erinnerung", style: { width: "auto" } });
+  const hint = h("span.hint");
+  const draw = () => {
+    time.disabled = !on.checked;
+    hint.textContent = on.checked
+      ? /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+        ? "Kommt nur, wenn du dein Tagesziel noch nicht erreicht hast."
+        : "Auf dem PC nur, solange die App läuft. Kommt nur, wenn das Tagesziel noch offen ist."
+      : "Eine Erinnerung am Tag, wenn du noch nicht gelernt hast.";
+  };
+  const save = async () => {
+    const ok = await setReminder(on.checked ? time.value : "", stats);
+    if (on.checked && !ok) {
+      on.checked = false;
+      toast("Ohne Erlaubnis für Benachrichtigungen geht die Erinnerung nicht. Du kannst sie in den Einstellungen des Geräts erlauben.");
+    }
+    draw();
+  };
+  on.addEventListener("change", save);
+  time.addEventListener("change", save);
+  draw();
+  return h("div.field", h("div.row.between", h("label", { for: "remind", style: { "font-weight": "700" } }, "Lern-Erinnerung"), h("div.row", time, on)), hint);
+}
+
+/** Version, Variante, Projekt und Rückmeldungen an die Entwickler. */
+async function aboutCard() {
+  const info = await appInfo();
+  const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const variant = window.__TAURI__ ? (mobile ? "Handy-App" : "PC-App") : "Web-App";
+  // App mit Server: eigene Version vom lokalen Kern, „version“ kommt dann vom Server
+  const local = window.__TAURI__ && state.session?.remote ? await call("device_info").then((d) => d.version).catch(() => null) : null;
+  const line = local ? `Lernpfad ${local} · ${variant} · Server ${info.version}` : `Lernpfad ${info.version} · ${variant}${state.session?.mode === "server" ? " · eigener Server" : ""}`;
+  return h(
+    "div.card",
+    h("h2", "Über Lernpfad"),
+    h("p.muted.num", line),
+    h(
+      "div.row",
+      { style: { "flex-wrap": "wrap", gap: "8px" } },
+      h("button.btn.secondary", { type: "button", onclick: () => openReport({ kind: "bug" }) }, icon("warning"), "Fehler melden"),
+      h("button.btn.secondary", { type: "button", onclick: () => openReport({ kind: "idea" }) }, icon("sparkle"), "Idee vorschlagen"),
+      h("button.btn.ghost", { type: "button", onclick: () => openExternal(`https://github.com/${info.repo}`) }, icon("link-simple"), "Projekt auf GitHub"),
+    ),
+    h("p.hint", "Meldungen werden Issues auf GitHub. Mit gehen Systemdaten von Gerät und Server, nie dein Name."),
   );
 }
 
@@ -183,12 +236,12 @@ function linkBox(link, hint) {
   return h("div.stack", { style: { gap: "6px" } }, h("div.link-box", input, btn), hint ? h("span.hint", hint) : null);
 }
 
-/** Fehler eines Server-Aufrufs als Toast, statt die Karte kaputt zu lassen. */
+/** Fehler eines Server-Aufrufs als Toast (mit „Melden“), statt die Karte kaputt zu lassen. */
 const safe = (fn) => async (...a) => {
   try {
     await fn(...a);
   } catch (e) {
-    toast(String(e?.message || e));
+    fail(e);
   }
 };
 
@@ -221,6 +274,7 @@ function accountCard(user) {
       "div.row",
       { style: { "flex-wrap": "wrap", gap: "8px" } },
       h("button.btn.secondary", { type: "button", onclick: changePassword }, icon("lock-simple"), "Passwort ändern"),
+      h("button.btn.ghost", { type: "button", style: { color: "var(--wrong)" }, onclick: deleteAccount }, icon("trash"), "Konto löschen"),
       state.session.remote
         ? h("button.btn.secondary", { type: "button", onclick: safe(() => call("server_disconnect").then(() => location.reload())) }, icon("hard-drives"), "Zurück zu lokal")
         : h("button.btn.ghost", { type: "button", onclick: logout }, icon("sign-out"), "Abmelden"),
@@ -255,6 +309,36 @@ function changePassword() {
       err.textContent = e?.locked ? "Zu viele Fehlversuche. Versuch es in ein paar Minuten noch einmal." : String(e?.message || e);
       err.hidden = false;
       save.disabled = false;
+    }
+  });
+}
+
+/** Eigenes Konto auf dem Server löschen, mit Passwort. Geteilte Kurse behalten die anderen (sie gehen an einen Admin). */
+function deleteAccount() {
+  const pw = h("input.input", { id: "del-pw", type: "password", autocomplete: "current-password", "aria-describedby": "del-error" });
+  const err = h("p.form-error", { id: "del-error", role: "alert", hidden: true });
+  const go = h("button.btn.block.wrong", { type: "button" }, "Konto endgültig löschen");
+  openSheet({
+    title: "Konto löschen?",
+    body: [
+      h("p", "Dein Konto, dein Fortschritt und deine privaten Kurse werden gelöscht. Das lässt sich nicht rückgängig machen."),
+      h("p.muted", "Kurse, die du mit anderen teilst, verschwinden nicht für sie: Sie gehen an einen Admin dieses Servers über."),
+      h("div.field", h("label", { for: "del-pw" }, "Zur Bestätigung dein Passwort"), pw),
+      err,
+    ],
+    foot: go,
+  });
+  go.addEventListener("click", async () => {
+    go.disabled = true;
+    try {
+      await call("delete_account", { current: pw.value });
+      // App mit Server: Verbindung lösen, lokal geht es weiter
+      if (state.session.remote) await call("server_disconnect").catch(() => {});
+      location.replace(location.pathname);
+    } catch (e) {
+      err.textContent = e?.locked ? "Zu viele Fehlversuche. Versuch es in ein paar Minuten noch einmal." : String(e?.message || e);
+      err.hidden = false;
+      go.disabled = false;
     }
   });
 }

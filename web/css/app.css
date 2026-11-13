@@ -714,12 +714,17 @@ textarea.input {
   display: grid;
   gap: 6px;
 }
-.course-head .exam {
+.course-head .exam,
+.unit-head + .exam {
   display: flex;
   align-items: center;
   gap: 8px;
   color: var(--ink-2);
   font-weight: 600;
+}
+.course-head > .btn {
+  justify-self: start;
+  margin-top: 6px;
 }
 .path {
   display: grid;
@@ -800,6 +805,46 @@ textarea.input {
   background: conic-gradient(var(--marker-lip) calc(var(--m) * 1turn), color-mix(in srgb, var(--line) 70%, transparent) 0);
   mask: radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 5px));
   pointer-events: none;
+}
+/* Prüfungsrelevant: kleine Zielscheibe oben rechts am Knoten */
+.node-exam {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--ember);
+  color: #fff;
+  box-shadow: 0 2px 0 color-mix(in srgb, var(--ember) 60%, #000);
+  pointer-events: none;
+}
+.node .node-exam .icon {
+  width: 16px;
+  height: 16px;
+}
+/* Abschnitt nur mit Organisatorischem: leise Zeile statt Knoten */
+.path-skip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  min-height: 44px;
+  border: 1.5px dashed var(--line);
+  border-radius: var(--pill);
+  background: transparent;
+  color: var(--ink-2);
+  font: 600 0.9rem/1.2 var(--font-text);
+  cursor: pointer;
+}
+.path-skip .icon {
+  width: 18px;
+  height: 18px;
+}
+.path-skip:hover {
+  border-color: var(--ink-2);
 }
 .node-label {
   font: 700 0.98rem/1.25 var(--font-display);
@@ -2473,4 +2518,58 @@ textarea.input {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
+}
+
+/* Fehler melden: was mitgeschickt wird */
+.report-data {
+  margin: 8px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: var(--r-sm);
+  background: var(--paper);
+  font: 0.78rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.report-q {
+  padding: 12px 14px;
+  box-shadow: none;
+  border: 1.5px solid var(--line);
+}
+.report-q p {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+/* Prüfungsschwerpunkte: Vorschläge der KI zum Übernehmen */
+.hint-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.hint-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1.5px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--card);
+  color: var(--ink);
+  font: 500 0.9rem/1.3 var(--font-text);
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.hint-chip .icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--royal);
+}
+.hint-chip[aria-pressed="true"] {
+  border-color: var(--right);
+  background: var(--right-soft);
 }

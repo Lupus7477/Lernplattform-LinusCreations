@@ -16,7 +16,7 @@ Die Apps laufen **immer lokal**. Optional verbinden sie sich mit deinem Server (
 ## So funktioniert es
 
 1. **Hinzufügen:** PDF auswählen. Der Text wird im Gerät bzw. Browser gelesen (pdf.js) und in Abschnitte von etwa 5000 Zeichen geteilt. Dabei werden auch Grafiken gesucht (siehe unten).
-2. **Vorbereiten (KI, im Hintergrund):** Pro Abschnitt erzeugt die KI Titel, Zusammenfassung und die wichtigsten Begriffe. Fragen entstehen, wenn eine Einheit dran ist; die nächste wird vorab vorbereitet. Danach schreibt die KI 1–2 Strukturaufgaben, die zum Stoff passen.
+2. **Vorbereiten (KI, im Hintergrund):** Pro Abschnitt sortiert die KI zuerst Seiten mit reinem Organisatorischem aus (siehe unten). Dann erzeugt sie Titel, Zusammenfassung und die wichtigsten Begriffe. Fragen entstehen, wenn eine Einheit dran ist; die nächste wird vorab vorbereitet. Danach schreibt die KI 1–2 Strukturaufgaben, die zum Stoff passen.
 3. **Lernen (ohne KI):** Die Antworten prüft der Code, nicht die KI.
    - Multiple Choice, Richtig/Falsch, Lückentext (eine oder mehrere Lücken), Begriffe zuordnen
    - **Matrix füllen:** Aussagen in Felder ziehen oder antippen. Vier Felder werden zur 2×2-Matrix, eine SWOT bekommt die Achsen intern/extern und hilfreich/schädlich. Ab Stufe 2 als Szenario („Erstelle die SWOT für ein Café“) mit Aussagen, die nirgends hingehören.
@@ -24,8 +24,10 @@ Die Apps laufen **immer lokal**. Optional verbinden sie sich mit deinem Server (
    - **Grafik beschriften:** eine Grafik aus den Folien mit nummerierten Stellen, die Begriffe stehen zur Auswahl.
    
    Nach dem Prüfen gleiten falsch abgelegte Begriffe an ihren richtigen Platz.
-4. **Wiederholen:** Leitner-Boxen (1, 3, 7, 14, 30 Tage).
-5. **Motivation:** XP, Tagesziel, Streak, Lernstufe je Einheit.
+4. **Wiederholen:** Leitner-Boxen (1, 3, 7, 14, 30 Tage). Gemerkte und prüfungsrelevante Fragen kommen zuerst.
+5. **Motivation:** XP, Tagesziel, Streak, Lernstufe je Einheit. In den Apps gibt es eine **Lern-Erinnerung** (Profil → Einstellungen):
+   - **Handy:** einmal am Tag zur gewählten Uhrzeit, aber nur, wenn das Tagesziel noch offen ist.
+   - **PC:** nur, solange die App läuft.
 
 ### Strukturaufgaben: nur wenn der Stoff sie hergibt
 
@@ -37,6 +39,30 @@ Die Apps laufen **immer lokal**. Optional verbinden sie sich mit deinem Server (
   - Kurze Texte an einem Bild oder an Formen gelten als Beschriftung. Der Code schneidet die Grafik aus, übermalt die Beschriftungen in der Umgebungsfarbe und fragt sie ab.
   - Bilder ohne Textebene (Karte, Foto) werden mitgespeichert; ihre Stellen setzt man über „+ Aufgabe“ selbst.
   - Für schon eingelesene PDFs: Kurs bearbeiten → „Grafiken zum Beschriften“ → dieselbe Datei wählen.
+
+### Nur Lerninhalt: Organisatorisches fliegt raus
+
+Folien wie „Klausur am 14.02.“, „Sprechstunde Mi 10 Uhr“ oder die Literaturliste sind kein Lernstoff.
+
+- Die KI bekommt beim Analysieren jede Seite nummeriert und markiert die, auf denen **nur** Organisatorisches steht. Diese Seiten gehen nicht in Fragen, Begriffe, Erklärung und „Frag die KI“. Das PDF selbst bleibt vollständig gespeichert.
+- Besteht ein Abschnitt nur aus Organisatorischem, steht er im Lernpfad als leise Zeile „Nur Organisatorisches · übersprungen“.
+- Falsch aussortiert? Lernkarte oder Zeile → **Doch einbeziehen** (nur der Besitzer des Kurses). Der Abschnitt wird dann ohne Filter neu analysiert.
+- Zusätzlich verwirft der Code jede KI-Frage mit Wörtern wie „Klausur“, „Dozent“, „Sprechstunde“ oder „Vorlesung“.
+- Schon eingelesene Kurse werden nicht nachträglich gefiltert. Alte Orga-Fragen blendest du aus.
+
+### Prüfungsschwerpunkte
+
+Kurs bearbeiten → **Prüfungsschwerpunkte**: ein Thema pro Zeile. Drei Wege dorthin:
+
+- **Selbst eintragen**, z. B. aus Stoffplan, Lernzielen oder einer Altklausur.
+- **Aus PDF übernehmen:** Der Text kommt ins Feld, du streichst, was nicht drankommt.
+- **Vorschläge aus deinen Folien:** Was auf den aussortierten Orga-Folien zur Prüfung steht („Klausurrelevant: Kapitel 1–3“), bietet die App zum Antippen an. Ein Vorschlag zählt nur, wenn seine Wörter wirklich im Material stehen. Nichts wird automatisch übernommen.
+
+Danach ordnet die KI jede Einheit den Themen zu (kurzer Aufruf mit Titel, Zusammenfassung und Begriffen).
+
+- Prüfungsrelevante Einheiten tragen im Pfad eine kleine Zielscheibe. Ihre Fragen schreibt die KI schon vorab und mit Blick auf den Schwerpunkt. Die Erklärung geht besonders darauf ein.
+- **Für die Klausur merken:** In der Lektion über `⋯` oder auf der Lernkarte. Das gilt nur für dich.
+- **Prüfungstraining:** Lernpfad → „Prüfungsthemen üben“ oder Wiederholen → „Für die Klausur“. Es nimmt die Fragen der relevanten Einheiten und deine gemerkten, fällige zuerst.
 
 ### Eigene Aufgaben
 
@@ -52,6 +78,30 @@ Unklar formuliert oder nicht prüfungsrelevant? In der Lektion über `⋯` oder 
 - **Bearbeiten:** gilt für alle, die den Kurs nutzen.
 - **Ausblenden:** nur für dich, mit „Rückgängig“. Sind alle Fragen einer Einheit ausgeblendet, schreibt die KI eine neue Runde.
 - **Für alle löschen:** nur der Besitzer eines geteilten Kurses.
+
+## Fehler melden
+
+Profil → **Über Lernpfad** → „Fehler melden“ oder „Idee vorschlagen“, in der Lektion über `⋯` → „Fehler in dieser Frage melden“, oder direkt am Fehler-Toast über **Melden**. Jede Meldung wird ein Issue auf GitHub.
+
+- **Vorsortieren:** Bei einer Fehlermeldung prüft die App zuerst, ob es ein Programmfehler ist. Bekannte Hinweise wie „Kein Zugriff“, falsches Passwort, Server nicht erreichbar oder ein eingescanntes PDF erkennt der Code selbst. Diese Toasts bekommen gar kein „Melden“. Alles Unklare schätzt die KI ein. Bei einem normalen Hinweis zeigt die App, was du tun kannst („Trotzdem melden“ geht immer).
+- **Inhalt des Issues:**
+  - eine Beschreibung, die die KI schreibt
+  - die Einschätzung
+  - dein Originaltext
+  - die Fehlermeldung mit den letzten Fehlern
+  - die Frage, wenn sie aus dem Fragen-Menü kommt
+  - **immer die Systemdaten des Geräts und des Servers**: Version, Betriebssystem, CPU, RAM, KI-Stufe, GPU-Backend und -Gerät, letzte Geschwindigkeit, Größe der Datenbank
+  - Nicht enthalten sind Name, IP, Hostname und Pfade. Was mitgeht, lässt sich vor dem Senden aufklappen.
+- **Mit eigenem Server:** Der Server legt das Issue direkt an, niemand braucht ein GitHub-Konto. Seine Systemdaten und die Einschätzung hängt er selbst an. Höchstens 5 Meldungen pro Konto und Stunde. Dafür braucht der Server einen fine-grained Token, nur für dieses Repo, mit „Issues: Read and write“:
+  ```yaml
+  # compose.override.yaml
+  services:
+    lernpfad:
+      environment:
+        LERNPFAD_GITHUB_TOKEN: github_pat_…
+  ```
+- **Ohne Server (oder ohne Token):** Die App öffnet ein vorausgefülltes Issue im Browser. Zum Absenden braucht man dort ein GitHub-Konto. Wird der Text zu lang für den Link, kürzt die App zuerst Fehlerliste und Frage, nie die Systemdaten.
+- Nutzertext steht im Issue in Code-Blöcken, @-Erwähnungen, Links und Bilder werden also nicht dargestellt.
 
 ## KI
 
@@ -82,6 +132,8 @@ Noch kein Konto. Einrichten (einmalig, nur mit diesem Link):
 1. **Einrichten:** Link öffnen, Name und Passwort festlegen. Dieses erste Konto ist Admin. Nur wer das Server-Protokoll sieht, kann den Server einrichten.
 2. **Einladen:** Profil → Mitglieder → „Jemanden einladen“. Der Link gilt 7 Tage und für ein Konto. Eine freie Registrierung gibt es nicht.
 3. **Teilen:** Kurs bearbeiten → „Mit allen auf diesem Server teilen“. Jeder behält seinen eigenen Fortschritt.
+   - **Verlassen:** Mitglieder können einen geteilten Kurs unter Hinzufügen verlassen. Ihr Fortschritt bleibt erhalten. Kurse für alle holen sie unter „Ausgeblendete Kurse“ zurück. Bei ausgewählten Personen holt eine neue Einladung sie zurück.
+   - **Konto löschen:** Profil → Konto → „Konto löschen“ (mit Passwort). Private Kurse werden gelöscht, geteilte gehen an einen Admin über, damit die anderen sie behalten. Der letzte Admin kann sich nicht löschen.
 4. **Handy:** Seite öffnen, „Zum Startbildschirm hinzufügen“. Oder die App über den Verbindungslink aus Profil → Konto verbinden.
 
 **Lokale Daten mitnehmen:** Die `lernen.db` der App vor dem ersten Start in den Datenordner kopieren. Dein Konto aus der Einrichtung übernimmt dann alle Kurse und den Fortschritt.
@@ -141,6 +193,7 @@ Wer nur die Adresse kennt, bekommt die Anmeldeseite und sonst nichts. Jede Daten
   - Ohne eigenes Zertifikat erzeugt er eines und zeigt dessen Fingerabdruck. Die Apps pinnen genau dieses Zertifikat.
   - Mit echtem Zertifikat sendet er auch HSTS.
 - **Verwaltung (Admin):** Konten sperren (sofort auf allen Geräten abgemeldet) und Passwort-Links ausstellen, wenn jemand sein Passwort vergessen hat.
+- Fehlermeldungen gehen nur mit `LERNPFAD_GITHUB_TOKEN` an GitHub. Der Token bleibt auf dem Server und erreicht keine App.
 - Die Dateien selbst sind nicht verschlüsselt. Für den Fall, dass die Platte gestohlen wird, ist die Festplattenverschlüsselung des Systems da (LUKS, BitLocker, FileVault).
 
 ## Entwickeln
@@ -175,7 +228,8 @@ Oberfläche ohne Rust: `python3 -m http.server 8765 -d web`. Dann ersetzt `web/d
 core/src/            Crate lernpfad-core: alles, was App und Server teilen
   api.rs             alle Befehle der Oberfläche + Rechteprüfung (Besitzer, Mitglied)
   ai.rs              Modell-Download, Laden/Entladen, Text erzeugen (llama.cpp)
-  import.rs          Abschnitte, Prompts, Qualitätsfilter, Strukturaufgaben + Selbstprüfung, Grafiken, Hintergrund-Worker
+  import.rs          Abschnitte, Themenfilter, Prüfungsthemen, Prompts, Qualitätsfilter, Strukturaufgaben + Selbstprüfung, Grafiken, Hintergrund-Worker
+  report.rs          Fehler melden: Systemdaten, Vorsortieren (Regel + KI), Issue-Text, GitHub-Post (nur Server)
   learn.rs           Antwortprüfung (auch Matrix, Reihenfolge, Lücken, Grafik), Leitner-Boxen, XP, Streak
   db.rs              SQLite-Schema und Migration
 src-tauri/src/lib.rs Tauri-Hülle: lokal oder an den eigenen Server weiterleiten (Zertifikat gepinnt)
@@ -192,4 +246,4 @@ Quiz Duell wenn auf Server und es Kommonitonen gibt, ...
 
 ## Datenschutz
 
-In den Apps bleibt alles auf dem Gerät: Dokumente, Fortschritt und Chats. Auf dem eigenen Server liegt alles auf deinem Server. Ins Internet geht es nur, um einmalig das KI-Modell von Hugging Face zu laden.
+In den Apps bleibt alles auf dem Gerät: Dokumente, Fortschritt und Chats. Auf dem eigenen Server liegt alles auf deinem Server. Ins Internet geht es nur, um einmalig das KI-Modell von Hugging Face zu laden, und wenn du selbst einen Fehler oder eine Idee an GitHub meldest.
