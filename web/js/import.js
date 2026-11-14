@@ -10,6 +10,16 @@ const PDF_PROBLEMS = {
   InvalidPDFException: "Diese Datei ist kein gültiges PDF oder beschädigt. Speichere sie neu als PDF und versuch es noch einmal.",
   PasswordException: "Dieses PDF ist mit einem Passwort geschützt. Speichere es ohne Passwort und versuch es noch einmal.",
 };
+// WebKit (Safari, iPhone) kann kein `for await` über ReadableStream; pdf.js braucht das in getTextContent (Issue #3).
+ReadableStream.prototype[Symbol.asyncIterator] ??= async function* () {
+  const reader = this.getReader();
+  try {
+    for (let r; !(r = await reader.read()).done; ) yield r.value;
+  } finally {
+    reader.releaseLock();
+  }
+};
+
 /** Liest Text und Grafiken zum Beschriften. Eine Seite ohne erkennbare Grafik kostet nur das Operator-Lesen. `withFigures: false` = nur Text. */
 async function readPdf(file, onPage, { withFigures = true } = {}) {
   pdfjs ??= await import("../vendor/pdf.min.mjs").then((m) => {
