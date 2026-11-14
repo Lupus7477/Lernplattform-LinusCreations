@@ -60,6 +60,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   let poll = null;
   let countTimer = null;
   let resultShown = false;
+  let ticking = false;
   const t0 = Date.now();
   const streakBefore = state.stats?.streak ?? 0;
 
@@ -768,6 +769,10 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     onBattle(b);
     poll ??= setInterval(battleTick, 1500);
     if (b.state === "waiting") return message("users", "Warte auf Gegner", "Sobald jemand deine Herausforderung annimmt, geht es los. „Zurück“ zieht sie zurück.");
+    if (b.state === "expired") {
+      clearInterval(poll);
+      return message("hourglass-medium", "Herausforderung abgelaufen", "In 30 Minuten hat niemand angenommen. Fordere einfach neu heraus.");
+    }
     if (b.state === "countdown") return countdown(b.starts_in);
     if (b.state === "done") return battleResult(b);
     queue = b.exercises.slice(b.me.answered).map((ex, i) => ({ ...ex, idx: b.me.answered + i }));
@@ -780,12 +785,15 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   }
 
   async function battleTick() {
+    if (ticking) return; // langsame Antwort: keine zweite Abfrage obendrauf
+    ticking = true;
     const was = battle?.state;
     const b = await call("battle", { battleId }).catch(() => null);
-    if (!b) return;
+    ticking = false;
+    if (!b || !root.isConnected) return;
     onBattle(b);
     if (b.state === "done") return resultShown || battleResult(b);
-    if (was === "waiting") battleLoad();
+    if (was === "waiting" && b.state !== "waiting") battleLoad();
   }
 
   /** Gegner oben neben dem eigenen Fortschritt: Ring + Name + wie weit. */
@@ -800,6 +808,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
 
   /** 3 · 2 · 1: Die Aufgaben schickt der Server erst danach. */
   function countdown(ms) {
+    clearTimeout(countTimer);
     menuBtn.hidden = true;
     const num = h("b.count-num", { "aria-live": "assertive" });
     body.replaceChildren(h("div.done-screen", h("p.muted", `Gegen ${battle.them?.name ?? "…"}`), num, h("p.muted", "An jeder Stelle dieselbe Aufgabenart. Mehr Richtige gewinnt, bei Gleichstand die kürzere Zeit.")));
@@ -851,6 +860,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
         h("h1", title),
         why ? h("p.muted", why) : null,
         h("div.tally.duo", card(me, "Du", b.result > 0), card(them, them.name, b.result < 0)),
+        b.xp ? h("p", { style: { "font-weight": "700" } }, icon("star-fill"), ` +${b.xp} XP für die Bestenliste`) : null,
         h("p.hint", them.course ? `${them.name} hat mit „${them.course}“ gespielt.` : `${them.name} hat mit einem eigenen Kurs gespielt.`),
       ),
     );
@@ -872,7 +882,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   async function askClose() {
     if (battleId && battle?.state === "running" && phase !== "done") {
       const quit = await confirmSheet({ title: "Battle aufgeben?", text: "Das zählt als verloren.", confirm: "Aufgeben", cancel: "Weiterspielen", danger: true });
-      if (quit) await call("battle_leave", { battleId }).then(exit, fail);
+      if (quit) await call("battle_leave", { battleId, giveUp: true }).then(exit, fail);
       return;
     }
     if (phase === "done" || phase === "loading" || total === 0) return exit();
@@ -904,6 +914,11 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   document.addEventListener("keydown", onKey);
 
   function close() {
+    // Wartend verlassen (Zurück, Escape, Browser-Zurück, anderer Tab) → Herausforderung zurückziehen.
+    // Hat inzwischen jemand angenommen, zieht der Server nicht zurück: dann das Battle wieder öffnen statt kampflos zu verlieren.
+    if (battleId && battle?.state === "waiting") {
+      call("battle_leave", { battleId, giveUp: false }).then((gone) => gone || (location.hash = `#/lesson/battle-${battleId}`), () => {});
+    }
     unsub?.();
     clearInterval(poll);
     clearTimeout(countTimer);
@@ -912,7 +927,6 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     root.remove();
   }
   function exit() {
-    if (battleId && battle?.state === "waiting") call("battle_leave", { battleId }).catch(() => {}); // Herausforderung zurückziehen
     close();
     onExit();
   }

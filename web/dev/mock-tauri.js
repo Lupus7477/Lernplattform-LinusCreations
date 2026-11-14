@@ -418,18 +418,20 @@ const handlers = {
     const state = t < b.t0 + 2000 ? "waiting" : done ? "done" : t < start ? "countdown" : "running";
     const time = (s) => (s.answered === rounds ? s.ms : Infinity);
     const result = !done ? null : b.gaveUp ? -1 : Math.sign(me.correct - them.correct || time(them) - time(me));
-    return { state, starts_in: Math.max(0, start - t), rounds, me, them: state === "waiting" ? null : them, result, exercises: exercises && state === "running" ? b.ex.map(toExercise) : [] };
+    const xp = result == null ? null : 2 * me.correct + (result > 0 ? 10 : 0);
+    return { state, starts_in: Math.max(0, start - t), rounds, me, them: state === "waiting" ? null : them, result, xp, exercises: exercises && state === "running" ? b.ex.map(toExercise) : [] };
   },
   battle_answer: ({ idx, given }) => {
     const r = handlers.answer({ questionId: mockBattle.ex[idx].id, given, retry: true });
     mockBattle.mine.push({ ok: r.correct, ms: Date.now() - mockBattle.t0 - 5000 });
     return r;
   },
-  battle_leave: () => (mockBattle.gaveUp = true),
+  battle_leave: ({ giveUp }) => (giveUp ? (mockBattle.gaveUp = true) : true),
   leaderboard: () => [
-    { name: "Mia", me: false, battles: 5, wins: 4, correct: 31, total: 40 },
-    { name: "Ich", me: true, battles: 4, wins: 2, correct: 24, total: 32 },
-    { name: "Jonas", me: false, battles: 2, wins: 0, correct: 9, total: 16 },
+    { name: "Jonas", me: false, xp: 412, battles: 2, wins: 0 },
+    { name: "Mia", me: false, xp: 286, battles: 5, wins: 4 },
+    { name: "Ich", me: true, xp: 190, battles: 4, wins: 2 },
+    { name: "Lea", me: false, xp: 75, battles: 0, wins: 0 },
   ],
   stats: () => stats(),
   finish_lesson: ({ unitId, correct, total }) => {

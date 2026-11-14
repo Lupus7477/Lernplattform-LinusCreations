@@ -19,6 +19,7 @@ fn err(e: impl std::fmt::Display) -> String {
 
 /// Gleiche Meldung für „gibt es nicht“ und „gehört jemand anderem“: so lässt sich nicht durchprobieren, was existiert.
 pub const DENIED: &str = "Kein Zugriff";
+const IN_BATTLE: &str = "Während deines Battles geht das nicht. Spiel es erst zu Ende.";
 const NO_TEXT: &str = "In diesem PDF wurde kein Text gefunden. Ist es eingescannt?";
 
 /// Erste `n` Zeichen (nicht Bytes), damit Umlaute nicht zerschnitten werden.
@@ -42,6 +43,10 @@ macro_rules! args {
 pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&str)) -> R<Value> {
     fn ok<T: Serialize>(t: T) -> R<Value> {
         serde_json::to_value(t).map_err(err)
+    }
+    // Während eines Battles keine Lösungen über die normalen Befehle (sonst ließe sich jede Antwort vorher nachschlagen).
+    if matches!(cmd, "answer" | "question" | "unit_questions") && in_battle(&c.db.lock().unwrap(), who)? {
+        return Err(IN_BATTLE.into());
     }
     match cmd {
         "ai_status" => ok(c.ai.status()),
@@ -221,7 +226,10 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
             let (battle_id, idx, given) = args!(v, { battle_id: i64, idx: usize, given: String });
             ok(battle_answer(c, who, battle_id, idx, &given)?)
         }
-        "battle_leave" => ok(battle_leave(c, who, args!(v, { battle_id: i64 }))?),
+        "battle_leave" => {
+            let (battle_id, give_up) = args!(v, { battle_id: i64, give_up: bool });
+            ok(battle_leave(c, who, battle_id, give_up)?)
+        }
         "leaderboard" => ok(leaderboard(c, who, args!(v, { course_id: Option<i64> }))?),
         "stats" => ok(stats_of(&c.db.lock().unwrap(), who)?),
         "finish_lesson" => {
@@ -1084,6 +1092,11 @@ fn answer(c: &Core, who: &Who, question_id: i64, given: &str, retry: bool) -> R<
 /// Antwort prüfen (mit Rechteprüfung), ohne etwas zu speichern. Dazu die aktuelle Box des Nutzers.
 fn graded(conn: &Connection, who: &Who, question_id: i64, given: &str) -> R<(AnswerOut, i64)> {
     question_role(conn, who, question_id)?;
+    grade_question(conn, who, question_id, given)
+}
+
+/// Wie [`graded`], aber ohne Rechteprüfung: nur für Fragen, die der Server selbst zugeteilt hat (Battle).
+fn grade_question(conn: &Connection, who: &Who, question_id: i64, given: &str) -> R<(AnswerOut, i64)> {
     let (kind, prompt, options, expected, why, groups, spots, boxed): (String, String, String, String, String, String, String, i64) = conn
         .query_row(
             "SELECT q.kind, q.prompt, q.options, q.answer, q.why, q.groups, q.spots, COALESCE(p.box, 0) FROM questions q
@@ -1394,6 +1407,24 @@ fn battle_pool(conn: &Connection, course_id: i64, u1: i64, u2: i64) -> R<Vec<(i6
     Ok(picked.into_iter().map(|p| (p.id, battle_key(&to_exercise(p, &mut rng)))).collect())
 }
 
+/// Ein Battle samt Punkten beider Seiten in einer Abfrage. Einzelne Battles und die Bestenliste lesen es gleich.
+const BATTLE_SQL: &str = "SELECT b.id, b.a_id, b.b_id, b.a_course, b.b_course, b.a_qs, b.b_qs, b.created_at, b.started_ms, b.gave_up,
+   (SELECT COUNT(*) FROM battle_answers x WHERE x.battle_id = b.id AND x.user_id = b.a_id),
+   (SELECT COALESCE(SUM(correct), 0) FROM battle_answers x WHERE x.battle_id = b.id AND x.user_id = b.a_id),
+   (SELECT COALESCE(MAX(ms), 0) FROM battle_answers x WHERE x.battle_id = b.id AND x.user_id = b.a_id),
+   (SELECT COUNT(*) FROM battle_answers x WHERE x.battle_id = b.id AND x.user_id = b.b_id),
+   (SELECT COALESCE(SUM(correct), 0) FROM battle_answers x WHERE x.battle_id = b.id AND x.user_id = b.b_id),
+   (SELECT COALESCE(MAX(ms), 0) FROM battle_answers x WHERE x.battle_id = b.id AND x.user_id = b.b_id)
+ FROM battles b";
+
+#[derive(Serialize, Clone, Copy, Default, PartialEq, Debug)]
+struct Score {
+    answered: usize,
+    correct: usize,
+    /// Zeit der letzten Antwort seit dem Start
+    ms: i64,
+}
+
 struct Battle {
     a: i64,
     b: Option<i64>,
@@ -1404,55 +1435,42 @@ struct Battle {
     created_at: i64,
     started_ms: Option<i64>,
     gave_up: Option<i64>,
+    sa: Score,
+    sb: Score,
+}
+
+fn battle_from(r: &rusqlite::Row) -> rusqlite::Result<Battle> {
+    let (a_qs, b_qs): (String, String) = (r.get(5)?, r.get(6)?);
+    let score = |i: usize| -> rusqlite::Result<Score> { Ok(Score { answered: r.get::<_, i64>(i)? as usize, correct: r.get::<_, i64>(i + 1)? as usize, ms: r.get(i + 2)? }) };
+    Ok(Battle {
+        a: r.get(1)?,
+        b: r.get(2)?,
+        a_course: r.get(3)?,
+        b_course: r.get(4)?,
+        a_qs: serde_json::from_str(&a_qs).unwrap_or_default(),
+        b_qs: serde_json::from_str(&b_qs).unwrap_or_default(),
+        created_at: r.get(7)?,
+        started_ms: r.get(8)?,
+        gave_up: r.get(9)?,
+        sa: score(10)?,
+        sb: score(13)?,
+    })
 }
 
 fn battle_row(conn: &Connection, id: i64) -> R<Battle> {
-    conn.query_row("SELECT a_id, b_id, a_course, b_course, a_qs, b_qs, created_at, started_ms, gave_up FROM battles WHERE id = ?1", [id], |r| {
-        let (a_qs, b_qs): (String, String) = (r.get(4)?, r.get(5)?);
-        Ok(Battle {
-            a: r.get(0)?,
-            b: r.get(1)?,
-            a_course: r.get(2)?,
-            b_course: r.get(3)?,
-            a_qs: serde_json::from_str(&a_qs).unwrap_or_default(),
-            b_qs: serde_json::from_str(&b_qs).unwrap_or_default(),
-            created_at: r.get(6)?,
-            started_ms: r.get(7)?,
-            gave_up: r.get(8)?,
-        })
-    })
-    .optional()
-    .map_err(err)?
-    .ok_or_else(|| DENIED.into())
-}
-
-#[derive(Serialize, Clone, Copy, Default, PartialEq, Debug)]
-struct Score {
-    answered: usize,
-    correct: usize,
-    /// Zeit der letzten Antwort seit dem Start
-    ms: i64,
-}
-
-fn score(conn: &Connection, battle_id: i64, user: i64) -> R<Score> {
-    conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(correct), 0), COALESCE(MAX(ms), 0) FROM battle_answers WHERE battle_id = ?1 AND user_id = ?2",
-        params![battle_id, user],
-        |r| Ok(Score { answered: r.get::<_, i64>(0)? as usize, correct: r.get::<_, i64>(1)? as usize, ms: r.get(2)? }),
-    )
-    .map_err(err)
+    conn.query_row(&format!("{BATTLE_SQL} WHERE b.id = ?1"), [id], battle_from).optional().map_err(err)?.ok_or_else(|| DENIED.into())
 }
 
 impl Battle {
     fn rounds(&self) -> usize {
         self.a_qs.len()
     }
-    fn over(&self, a: Score, b: Score, now: i64) -> bool {
-        self.started_ms.is_some_and(|t| self.gave_up.is_some() || (a.answered == self.rounds() && b.answered == self.rounds()) || now >= t + BATTLE_MS)
+    fn over(&self, now: i64) -> bool {
+        self.started_ms.is_some_and(|t| self.gave_up.is_some() || (self.sa.answered == self.rounds() && self.sb.answered == self.rounds()) || now >= t + BATTLE_MS)
     }
     /// Aus Sicht von A: Greater = A gewinnt. Aufgeben verliert immer; sonst mehr Richtige,
     /// bei Gleichstand die kürzere Gesamtzeit. Wer nicht fertig wurde, ist bei Gleichstand der Langsamere.
-    fn outcome(&self, a: Score, b: Score) -> std::cmp::Ordering {
+    fn outcome(&self) -> std::cmp::Ordering {
         use std::cmp::Ordering::*;
         match self.gave_up {
             Some(u) if u == self.a => return Less,
@@ -1460,8 +1478,23 @@ impl Battle {
             None => {}
         }
         let time = |s: Score| if s.answered == self.rounds() { s.ms } else { i64::MAX };
-        a.correct.cmp(&b.correct).then(time(b).cmp(&time(a)))
+        self.sa.correct.cmp(&self.sb.correct).then(time(self.sb).cmp(&time(self.sa)))
     }
+    /// waiting | expired (niemand hat rechtzeitig angenommen) | countdown | running | done
+    fn state(&self, now: i64) -> &'static str {
+        match self.started_ms {
+            None if self.created_at < db::now() - OPEN_SECS => "expired",
+            None => "waiting",
+            _ if self.over(now) => "done",
+            Some(t) if now < t => "countdown",
+            _ => "running",
+        }
+    }
+}
+
+/// XP für die Bestenliste: je richtige Antwort und ein Bonus für den Sieg.
+fn battle_xp(s: Score, won: bool) -> i64 {
+    2 * s.correct as i64 + if won { 10 } else { 0 }
 }
 
 #[derive(Serialize)]
@@ -1476,7 +1509,6 @@ struct Side {
 
 #[derive(Serialize)]
 struct BattleOut {
-    /// waiting | countdown | running | done
     state: &'static str,
     starts_in: i64,
     rounds: usize,
@@ -1484,6 +1516,8 @@ struct BattleOut {
     them: Option<Side>,
     /// 1 gewonnen, 0 unentschieden, -1 verloren (nur wenn vorbei)
     result: Option<i8>,
+    /// Meine XP aus diesem Battle (nur wenn vorbei)
+    xp: Option<i64>,
     /// Meine Aufgaben, erst ab dem Start (sonst ließe sich im Countdown vorlesen)
     exercises: Vec<Exercise>,
 }
@@ -1509,8 +1543,13 @@ fn battle_join(c: &Core, who: &Who, id: i64, course_id: i64) -> R<()> {
     let conn = c.db.lock().unwrap();
     role(&conn, who, course_id)?;
     let bt = battle_row(&conn, id)?;
-    if bt.a == who.id || bt.b.is_some() || bt.created_at < db::now() - OPEN_SECS {
-        return Err("Dieses Battle ist nicht mehr offen.".into());
+    const GONE: &str = "Dieses Battle ist nicht mehr offen.";
+    if bt.a == who.id || bt.b.is_some() || bt.state(now_ms()) != "waiting" {
+        return Err(GONE.into());
+    }
+    // Der Herausforderer muss seinen Kurs noch sehen (verlassen oder nicht mehr geteilt → seine Fragen sind nicht mehr seine)
+    if role(&conn, &Who { id: bt.a, admin: false }, bt.a_course).is_err() {
+        return Err(GONE.into());
     }
     let same = course_id == bt.a_course;
     let a = battle_pool(&conn, bt.a_course, bt.a, if same { who.id } else { bt.a })?;
@@ -1545,25 +1584,16 @@ fn battle_state(c: &Core, who: &Who, id: i64, with_exercises: bool) -> R<BattleO
     let conn = c.db.lock().unwrap();
     let bt = battle_row(&conn, id)?;
     let (is_a, qs) = my_side(&bt, who)?;
-    let (sa, sb) = (score(&conn, id, bt.a)?, bt.b.map(|b| score(&conn, id, b)).transpose()?.unwrap_or_default());
     let now = now_ms();
-    let over = bt.over(sa, sb, now);
-    let state = match bt.started_ms {
-        None => "waiting",
-        _ if over => "done",
-        Some(t) if now < t => "countdown",
-        _ => "running",
-    };
-    let a = side(&conn, who, &bt, bt.a, bt.a_course, sa)?;
+    let state = bt.state(now);
+    let a = side(&conn, who, &bt, bt.a, bt.a_course, bt.sa)?;
     let b = match (bt.b, bt.b_course) {
-        (Some(u), Some(course)) => Some(side(&conn, who, &bt, u, course, sb)?),
+        (Some(u), Some(course)) => Some(side(&conn, who, &bt, u, course, bt.sb)?),
         _ => None,
     };
     let (me, them) = if is_a { (a, b) } else { (b.ok_or(DENIED)?, Some(a)) };
-    let result = over.then(|| {
-        let o = bt.outcome(sa, sb);
-        (if is_a { o } else { o.reverse() }) as i8
-    });
+    let result = (state == "done").then(|| (if is_a { bt.outcome() } else { bt.outcome().reverse() }) as i8);
+    let xp = result.map(|r| battle_xp(me.score, r > 0));
     let mut exercises = vec![];
     if with_exercises && state == "running" {
         let mut rng = learn::Shuffler::new();
@@ -1574,28 +1604,32 @@ fn battle_state(c: &Core, who: &Who, id: i64, with_exercises: bool) -> R<BattleO
             exercises.push(to_exercise(p, &mut rng));
         }
     }
-    Ok(BattleOut { state, starts_in: bt.started_ms.map_or(0, |t| (t - now).max(0)), rounds: bt.rounds(), me, them, result, exercises })
+    Ok(BattleOut { state, starts_in: bt.started_ms.map_or(0, |t| (t - now).max(0)), rounds: bt.rounds(), me, them, result, xp, exercises })
 }
 
 /// Antworten nur der Reihe nach, nur während das Battle läuft. Die Zeit misst der Server.
 fn battle_answer(c: &Core, who: &Who, id: i64, idx: usize, given: &str) -> R<AnswerOut> {
     let conn = c.db.lock().unwrap();
     let bt = battle_row(&conn, id)?;
-    let (_, qs) = my_side(&bt, who)?;
-    let (sa, sb) = (score(&conn, id, bt.a)?, bt.b.map(|b| score(&conn, id, b)).transpose()?.unwrap_or_default());
+    let (is_a, qs) = my_side(&bt, who)?;
     let now = now_ms();
     if bt.started_ms.is_none_or(|t| now < t) {
         return Err("Das Battle hat noch nicht begonnen.".into());
     }
-    if bt.over(sa, sb, now) {
+    if bt.over(now) {
         return Err("Das Battle ist schon vorbei.".into());
     }
-    let mine = if bt.a == who.id { sa } else { sb };
+    let mine = if is_a { bt.sa } else { bt.sb };
     let question_id = *qs.get(idx).ok_or(DENIED)?;
-    if idx != mine.answered {
-        return Err("Diese Aufgabe ist schon beantwortet.".into());
+    if idx > mine.answered {
+        return Err("Beantworte zuerst die Aufgabe davor.".into());
     }
-    let (out, _) = graded(&conn, who, question_id, given)?;
+    // Die Frage hat der Server zugeteilt: keine neue Kursprüfung, sonst sperrt ein Kurs-Austritt mitten im Battle jede Antwort.
+    let (out, _) = grade_question(&conn, who, question_id, given)?;
+    // Schon gespeichert (Antwort kam nicht an, die Oberfläche schickt erneut) → nur das Ergebnis, die erste Antwort zählt.
+    if idx < mine.answered {
+        return Ok(out);
+    }
     conn.execute(
         "INSERT INTO battle_answers(battle_id, user_id, idx, correct, ms) VALUES(?1, ?2, ?3, ?4, ?5)",
         params![id, who.id, idx as i64, out.correct, now - bt.started_ms.unwrap_or(now)],
@@ -1604,17 +1638,30 @@ fn battle_answer(c: &Core, who: &Who, id: i64, idx: usize, given: &str) -> R<Ans
     Ok(out)
 }
 
-/// Warten → Herausforderung zurückziehen. Läuft es schon → aufgeben (zählt als verloren).
-fn battle_leave(c: &Core, who: &Who, id: i64) -> R<()> {
+/// `give_up = false`: Herausforderung zurückziehen, nur solange niemand angenommen hat. Hat jemand angenommen, kommt false
+/// zurück und das Battle läuft weiter. `give_up = true`: laufendes Battle aufgeben (zählt als verloren), nie nach dem Ende.
+fn battle_leave(c: &Core, who: &Who, id: i64, give_up: bool) -> R<bool> {
     let conn = c.db.lock().unwrap();
     let bt = battle_row(&conn, id)?;
     my_side(&bt, who)?;
-    if bt.b.is_none() {
-        conn.execute("DELETE FROM battles WHERE id = ?1", [id]).map_err(err)?;
-    } else {
-        conn.execute("UPDATE battles SET gave_up = ?2 WHERE id = ?1 AND gave_up IS NULL", params![id, who.id]).map_err(err)?;
+    if !give_up {
+        return Ok(conn.execute("DELETE FROM battles WHERE id = ?1 AND a_id = ?2 AND b_id IS NULL", params![id, who.id]).map_err(err)? > 0);
     }
-    Ok(())
+    if bt.b.is_none() || bt.over(now_ms()) {
+        return Ok(false);
+    }
+    Ok(conn.execute("UPDATE battles SET gave_up = ?2 WHERE id = ?1 AND gave_up IS NULL", params![id, who.id]).map_err(err)? > 0)
+}
+
+/// Läuft ein Battle, in dem ich noch Aufgaben offen habe? Dann keine Lösungen über die normalen Befehle.
+fn in_battle(conn: &Connection, who: &Who) -> R<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM battles b WHERE (b.a_id = ?1 OR b.b_id = ?1) AND b.b_id IS NOT NULL AND b.gave_up IS NULL AND b.started_ms > ?2
+           AND (SELECT COUNT(*) FROM battle_answers x WHERE x.battle_id = b.id AND x.user_id = ?1) < json_array_length(b.a_qs))",
+        params![who.id, now_ms() - BATTLE_MS],
+        |r| r.get(0),
+    )
+    .map_err(err)
 }
 
 #[derive(Serialize)]
@@ -1648,70 +1695,68 @@ fn battle_lobby(c: &Core, who: &Who) -> R<Value> {
         .map_err(err)?;
     // Beide fertig → nicht mehr „laufend“
     let active = match active {
-        Some(id) if !battle_over(&conn, id)? => Some(id),
+        Some(id) if !battle_row(&conn, id)?.over(now_ms()) => Some(id),
         _ => None,
     };
     Ok(json!({ "open": open, "active": active }))
-}
-
-fn battle_over(conn: &Connection, id: i64) -> R<bool> {
-    let bt = battle_row(conn, id)?;
-    let (sa, sb) = (score(conn, id, bt.a)?, bt.b.map(|b| score(conn, id, b)).transpose()?.unwrap_or_default());
-    Ok(bt.over(sa, sb, now_ms()))
 }
 
 #[derive(Serialize, Default)]
 struct Rank {
     name: String,
     me: bool,
+    xp: i64,
     battles: i64,
     wins: i64,
-    correct: i64,
-    total: i64,
 }
 
-/// Bestenliste eines Kurses (alle beendeten Battles, in denen jemand mit diesem Kurs angetreten ist)
-/// oder ohne Kurs die des ganzen Servers (nur Namen und Zahlen, darum für alle Konten). Reihenfolge: Siege, dann Trefferquote.
+/// Bestenliste nach XP: Lern-XP plus Battle-XP. Pro Kurs zählen Lektionen dieses Kurses und Battles, in denen jemand mit ihm
+/// angetreten ist; ohne Kurs alles auf dem Server (nur Namen und Zahlen, darum für alle Konten).
 fn leaderboard(c: &Core, who: &Who, course_id: Option<i64>) -> R<Vec<Rank>> {
     let conn = c.db.lock().unwrap();
     if let Some(id) = course_id {
         role(&conn, who, id)?;
     }
-    let ids: Vec<i64> = {
-        let mut stmt = conn.prepare("SELECT id FROM battles WHERE (?1 IS NULL OR a_course = ?1 OR b_course = ?1) AND b_id IS NOT NULL").map_err(err)?;
-        let ids = stmt.query_map([course_id], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?;
-        ids
+    let mut by_user: HashMap<i64, Rank> = HashMap::new();
+    // Wiederholungen über mehrere Kurse haben keine Einheit: sie zählen nur auf dem Server.
+    let lessons: Vec<(i64, i64)> = {
+        let mut stmt = conn
+            .prepare("SELECT l.user_id, SUM(l.xp) FROM lessons l LEFT JOIN units u ON u.id = l.unit_id WHERE ?1 IS NULL OR u.course_id = ?1 GROUP BY l.user_id")
+            .map_err(err)?;
+        let rows = stmt.query_map([course_id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?.collect::<Result<_, _>>().map_err(err)?;
+        rows
+    };
+    for (user, xp) in lessons {
+        by_user.entry(user).or_default().xp += xp;
+    }
+    let battles: Vec<Battle> = {
+        let mut stmt = conn.prepare(&format!("{BATTLE_SQL} WHERE b.b_id IS NOT NULL AND (?1 IS NULL OR b.a_course = ?1 OR b.b_course = ?1)")).map_err(err)?;
+        let rows = stmt.query_map([course_id], battle_from).map_err(err)?.collect::<Result<_, _>>().map_err(err)?;
+        rows
     };
     let now = now_ms();
-    let mut by_user: HashMap<i64, Rank> = HashMap::new();
-    for id in ids {
-        let bt = battle_row(&conn, id)?;
-        let Some(b) = bt.b else { continue };
-        let (sa, sb) = (score(&conn, id, bt.a)?, score(&conn, id, b)?);
-        if !bt.over(sa, sb, now) {
-            continue;
-        }
-        let o = bt.outcome(sa, sb);
-        for (user, course, s, won) in [(bt.a, bt.a_course, sa, o.is_gt()), (b, bt.b_course.unwrap_or(0), sb, o.is_lt())] {
-            if course_id.is_some_and(|id| id != course) {
+    for bt in battles.iter().filter(|b| b.over(now)) {
+        let o = bt.outcome();
+        for (user, course, s, won) in [(bt.a, Some(bt.a_course), bt.sa, o.is_gt()), (bt.b.unwrap_or(0), bt.b_course, bt.sb, o.is_lt())] {
+            if course_id.is_some_and(|id| Some(id) != course) {
                 continue;
             }
             let r = by_user.entry(user).or_default();
             r.battles += 1;
             r.wins += won as i64;
-            r.correct += s.correct as i64;
-            r.total += bt.rounds() as i64;
+            r.xp += battle_xp(s, won);
         }
     }
-    let mut out: Vec<Rank> = by_user
-        .into_iter()
-        .map(|(user, mut r)| {
-            r.name = conn.query_row("SELECT name FROM users WHERE id = ?1", [user], |x| x.get(0)).unwrap_or_default();
-            r.me = user == who.id;
-            r
-        })
-        .collect();
-    out.sort_by(|x, y| y.wins.cmp(&x.wins).then((y.correct * x.total.max(1)).cmp(&(x.correct * y.total.max(1)))).then(x.name.cmp(&y.name)));
+    let mut out = vec![];
+    for (user, mut r) in by_user {
+        // Gelöschte und gesperrte Konten fallen weg
+        let name: Option<String> = conn.query_row("SELECT name FROM users WHERE id = ?1 AND disabled = 0", [user], |x| x.get(0)).optional().map_err(err)?;
+        let Some(name) = name else { continue };
+        r.name = name;
+        r.me = user == who.id;
+        out.push(r);
+    }
+    out.sort_by(|x, y| y.xp.cmp(&x.xp).then(y.wins.cmp(&x.wins)).then(x.name.cmp(&y.name)));
     Ok(out)
 }
 
@@ -2205,7 +2250,8 @@ mod tests {
                (50, 31, 'mc', 'BIP misst?', '[\"Wertschöpfung\",\"Preise\",\"Zinsen\",\"Löhne\"]', 'Wertschöpfung'),
                (51, 31, 'true_false', 'Inflation senkt die Kaufkraft.', '[\"Richtig\",\"Falsch\"]', 'Richtig'),
                (52, 31, 'mc', 'Wer macht Geldpolitik?', '[\"EZB\",\"Bund\",\"Länder\",\"IWF\"]', 'EZB'),
-               (53, 31, 'order', 'Ordne', '[\"a\",\"b\",\"c\"]', '');",
+               (53, 31, 'order', 'Ordne', '[\"a\",\"b\",\"c\"]', '');
+             INSERT INTO lessons(unit_id, xp, correct, total, finished_at, user_id) VALUES(30, 30, 5, 5, 0, 1);",
         )
         .unwrap();
         let me = crate::LOCAL;
@@ -2216,6 +2262,8 @@ mod tests {
         assert!(lobby["open"][0]["course"].is_null());
         assert_eq!(run(&c, &U3, "battle_join", json!({ "battleId": id, "courseId": course })).unwrap_err(), DENIED);
         run(&c, &me, "battle_join", json!({ "battleId": id, "courseId": course })).unwrap();
+        // Veraltetes „Zurück“ des Herausforderers nach dem Annehmen: kein Aufgeben, das Battle läuft weiter
+        assert_eq!(run(&c, &U2, "battle_leave", json!({ "battleId": id, "giveUp": false })).unwrap(), false);
         assert!(run(&c, &U3, "battle_join", json!({ "battleId": id, "courseId": course })).is_err(), "schon vergeben");
         assert_eq!(run(&c, &U3, "battle", json!({ "battleId": id })).unwrap_err(), DENIED);
         let st = run(&c, &me, "battle", json!({ "battleId": id, "exercises": true })).unwrap();
@@ -2229,27 +2277,45 @@ mod tests {
         for (x, y) in mine.iter().zip(&theirs) {
             assert_eq!((&x["kind"], x["options"].as_array().unwrap().len()), (&y["kind"], y["options"].as_array().unwrap().len()), "an jeder Stelle dieselbe Art");
         }
-        assert_eq!(run(&c, &me, "battle_answer", json!({ "battleId": id, "idx": 1, "given": "x" })).unwrap_err(), "Diese Aufgabe ist schon beantwortet.", "nur der Reihe nach");
+        assert_eq!(run(&c, &me, "battle_answer", json!({ "battleId": id, "idx": 1, "given": "x" })).unwrap_err(), "Beantworte zuerst die Aufgabe davor.", "nur der Reihe nach");
+        // Während des Battles keine Lösung über die normalen Befehle
+        assert_eq!(run(&c, &me, "answer", json!({ "questionId": 40, "given": "x", "retry": true })).unwrap_err(), IN_BATTLE);
+        assert_eq!(run(&c, &me, "unit_questions", json!({ "unitId": 30 })).unwrap_err(), IN_BATTLE);
         for i in 0..3 {
             run(&c, &me, "battle_answer", json!({ "battleId": id, "idx": i, "given": "falsch" })).unwrap();
+            // Erneut geschickt (Antwort ging verloren): gleiche Rückmeldung, die erste Antwort bleibt
+            if i == 0 {
+                assert!(!run(&c, &me, "battle_answer", json!({ "battleId": id, "idx": 0, "given": "falsch" })).unwrap()["correct"].as_bool().unwrap());
+            }
             let q = theirs[i]["id"].as_i64().unwrap();
             let right: String = c.db.lock().unwrap().query_row("SELECT answer FROM questions WHERE id = ?1", [q], |r| r.get(0)).unwrap();
             assert!(run(&c, &U2, "battle_answer", json!({ "battleId": id, "idx": i, "given": right })).unwrap()["correct"].as_bool().unwrap());
         }
         let (a, b) = (run(&c, &me, "battle", json!({ "battleId": id })).unwrap(), run(&c, &U2, "battle", json!({ "battleId": id })).unwrap());
         assert_eq!((a["state"].as_str(), a["result"].as_i64(), b["result"].as_i64()), (Some("done"), Some(-1), Some(1)));
-        assert_eq!(b["me"]["correct"], 3);
+        assert_eq!((b["me"]["correct"].as_i64(), b["xp"].as_i64(), a["xp"].as_i64()), (Some(3), Some(16), Some(0)), "2 XP je richtige + 10 für den Sieg");
+        // Aufgeben nach dem Ende ändert nichts mehr
+        assert_eq!(run(&c, &me, "battle_leave", json!({ "battleId": id, "giveUp": true })).unwrap(), false);
+        assert_eq!(run(&c, &me, "battle", json!({ "battleId": id })).unwrap()["result"], -1);
         assert!(run(&c, &me, "battle_lobby", json!({})).unwrap()["active"].is_null(), "beendet ist nicht mehr laufend");
 
+        // Bestenliste nach XP: Lern-XP des Kurses + Battle-XP
         let board = run(&c, &U2, "leaderboard", json!({ "courseId": 11 })).unwrap();
-        assert_eq!((board[0]["name"].as_str(), board[0]["wins"].as_i64(), board.as_array().unwrap().len()), (Some("Kommilitone"), Some(1), 1));
-        assert_eq!(run(&c, &me, "leaderboard", json!({ "courseId": course })).unwrap()[0]["wins"], 0);
+        assert_eq!((board[0]["name"].as_str(), board[0]["xp"].as_i64(), board[0]["wins"].as_i64(), board.as_array().unwrap().len()), (Some("Kommilitone"), Some(16), Some(1), 1));
+        let mine = run(&c, &me, "leaderboard", json!({ "courseId": course })).unwrap();
+        assert_eq!((mine[0]["xp"].as_i64(), mine[0]["battles"].as_i64()), (Some(30), Some(1)), "30 Lern-XP, Battle verloren ohne Richtige");
         assert_eq!(run(&c, &U3, "leaderboard", json!({ "courseId": course })).unwrap_err(), DENIED);
-        // Ganzer Server: beide Seiten zählen, auch für Konten ohne Zugriff auf die Kurse
+        // Ganzer Server, auch für Konten ohne Zugriff auf die Kurse: wer mehr XP hat, steht vorn, nicht wer öfter gewinnt
         let all = run(&c, &U3, "leaderboard", json!({})).unwrap();
-        assert_eq!((all[0]["name"].as_str(), all[0]["wins"].as_i64(), all[1]["name"].as_str(), all.as_array().unwrap().len()), (Some("Kommilitone"), Some(1), Some("Ich"), 2));
+        assert_eq!((all[0]["name"].as_str(), all[1]["name"].as_str(), all.as_array().unwrap().len()), (Some("Ich"), Some("Kommilitone"), 2));
+        // Herausforderung ohne Annehmen verfällt nach 30 min
+        let old = run(&c, &U2, "battle_create", json!({ "courseId": 11 })).unwrap();
+        c.db.lock().unwrap().execute("UPDATE battles SET created_at = 0 WHERE id = ?1", [old.as_i64().unwrap()]).unwrap();
+        assert_eq!(run(&c, &U2, "battle", json!({ "battleId": old })).unwrap()["state"], "expired");
+        assert!(run(&c, &me, "battle_lobby", json!({})).unwrap()["open"].as_array().unwrap().is_empty());
         // Fortschritt (Leitner-Boxen) bleibt vom Battle unberührt
         let n: i64 = c.db.lock().unwrap().query_row("SELECT COUNT(*) FROM progress", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+        assert!(run(&c, &me, "answer", json!({ "questionId": 40, "given": "x", "retry": true })).is_ok(), "nach dem Battle wieder frei");
     }
 }

@@ -140,8 +140,8 @@ Noch kein Konto. Einrichten (einmalig, nur mit diesem Link):
 4. **Battle:** Tab „Battle“ (nur mit eigenem Server). Live gegen jemand anderen auf dem Server, jeder mit seinem eigenen Kurs, ein gemeinsamer Kurs ist nicht nötig.
    - **Fair durch den Code, nicht die KI:** Beim Annehmen sucht der Server bis zu 8 Aufgaben so aus, dass an jeder Stelle beide dieselbe Art mit gleich vielen Teilen haben (z. B. Stelle 1 Richtig/Falsch, Stelle 2 Matrix mit 2 Feldern und 6 Aussagen). Mit demselben Kurs sind es dieselben Fragen. Unter 3 passenden Aufgaben startet kein Battle.
    - Nach einem Countdown von 3 s schickt der Server die Aufgaben, prüft jede Antwort und misst die Zeit selbst. Antworten gehen nur der Reihe nach. Mehr Richtige gewinnt, bei Gleichstand die kürzere Gesamtzeit. Aufgeben zählt als verloren, nach 15 min ist jedes Battle vorbei.
-   - Den Lernfortschritt (Wiederholungen) ändert ein Battle nicht.
-   - **Bestenliste pro Kurs und für den ganzen Server:** Siege, Battles und Trefferquote. Pro Kurs zählen alle, die mit diesem Kurs angetreten sind, auf dem Server alle Battles.
+   - Den Lernfortschritt (Wiederholungen) ändert ein Battle nicht. Solange du in einem Battle Aufgaben offen hast, zeigt die App keine Lösungen (Lernkarte, Fragen-Menü), damit niemand nachschlägt.
+   - **Bestenliste nach XP, pro Kurs und für den ganzen Server:** XP aus dem Lernen plus Battle-XP (2 je richtige Antwort, 10 für den Sieg). Siege und Battles stehen daneben. Pro Kurs zählen die Lektionen dieses Kurses und die Battles, in denen jemand mit ihm angetreten ist. Die tägliche Wiederholung über mehrere Kurse zählt nur auf dem Server.
 5. **Handy:** Seite öffnen, „Zum Startbildschirm hinzufügen“. Oder die App über den Verbindungslink aus Profil → Konto verbinden.
 
 **Lokale Daten mitnehmen:** Die `lernen.db` der App vor dem ersten Start in den Datenordner kopieren. Dein Konto aus der Einrichtung übernimmt dann alle Kurse und den Fortschritt.

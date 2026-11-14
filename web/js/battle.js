@@ -40,6 +40,7 @@ export async function render() {
   );
 
   async function lobby() {
+    if (document.querySelector(".lesson")) return; // Battle läuft darüber: die Lobby darunter sieht niemand
     const l = await call("battle_lobby").catch(() => null);
     if (!l) return;
     active.replaceChildren(
@@ -72,10 +73,11 @@ export async function render() {
               `li.rank${r.me ? ".me" : ""}`,
               h("span.pos.num", i === 0 ? icon("crown-fill") : String(i + 1)),
               h("b", r.name),
-              h("span.muted.num", `${r.wins} ${r.wins === 1 ? "Sieg" : "Siege"} · ${r.battles} ${r.battles === 1 ? "Battle" : "Battles"} · ${Math.round((r.correct / Math.max(1, r.total)) * 100)} %`),
+              h("span.xp.num", `${r.xp} XP`),
+              h("span.muted.num", r.battles ? `${r.wins} ${r.wins === 1 ? "Sieg" : "Siege"} · ${r.battles} ${r.battles === 1 ? "Battle" : "Battles"}` : "noch kein Battle"),
             ),
           )
-        : [h("p.muted", server ? "Noch kein Battle auf diesem Server." : "Noch kein Battle mit diesem Kurs.")]),
+        : [h("p.muted", server ? "Noch keine XP auf diesem Server." : "Noch keine XP in diesem Kurs.")]),
     );
   }
 
@@ -87,6 +89,7 @@ export async function render() {
     h(
       "div.card",
       h("div.field", h("label", { for: "battle-course" }, "Dein Kurs"), select),
+      h("p.hint", "Gewinnen bringt XP für die Bestenliste: 2 je richtige Antwort, 10 für den Sieg. Dazu zählen deine XP aus dem Lernen."),
       h("p.hint", "Ihr braucht keinen gemeinsamen Kurs: Jeder spielt mit seinem eigenen. Der Code sucht die Aufgaben so aus, dass ihr an jeder Stelle dieselbe Art mit gleich vielen Teilen bekommt. Mit demselben Kurs sind es genau dieselben Fragen."),
       start,
     ),

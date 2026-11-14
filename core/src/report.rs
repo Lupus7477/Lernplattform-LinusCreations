@@ -47,7 +47,8 @@ pub const NORMAL: &[&str] = &[
     "battle ist nicht mehr offen",
     "battle hat noch nicht begonnen",
     "battle ist schon vorbei",
-    "schon beantwortet",
+    "aufgabe davor",
+    "waehrend deines battles",
 ];
 
 /// Teile von Meldungen, die sicher auf einen Programmfehler zeigen.
