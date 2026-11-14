@@ -1,4 +1,5 @@
-// Lern-Erinnerung (nur in den Apps). Handy: geplante Benachrichtigungen für die nächsten 7 Tage.
+// Lern-Erinnerung (nur in den Apps). Handy: geplante Benachrichtigungen für die nächsten 30 Tage
+// (neu geplant bei jedem Start und jeder Lektion; wer länger weg ist, bekommt trotzdem weiter eine).
 // PC: Timer, solange die App läuft (das Plugin plant dort nicht, es würde sofort melden).
 // Ist das Tagesziel heute erreicht, fällt die heutige Erinnerung weg.
 import { call } from "./api.js";
@@ -6,7 +7,7 @@ import { pref } from "./ui.js";
 
 const N = () => window.__TAURI__?.notification;
 const mobile = () => /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-const IDS = [7701, 7702, 7703, 7704, 7705, 7706, 7707];
+const IDS = Array.from({ length: 30 }, (_, d) => 7701 + d);
 let timer = null;
 
 /** Erinnerung möglich? (App mit Notification-Plugin) */
@@ -27,15 +28,21 @@ export async function setReminder(time, stats) {
   return !!time;
 }
 
-function text(stats) {
+/** `d` = in wie vielen Tagen. Die Zahl der fälligen Fragen stimmt nur für heute und morgen, später ändert sie sich. */
+function text(stats, d = 0) {
   const streak = stats?.streak || 0;
+  const due = d <= 1 ? stats?.due || 0 : 0;
   return {
     title: "Zeit für eine Lektion",
-    body: streak > 1 ? `Dein ${streak}-Tage-Streak wartet. Eine Lektion dauert nur ein paar Minuten.` : "Ein paar Minuten reichen schon, um dranzubleiben.",
+    body: due
+      ? `${due} ${due === 1 ? "Frage wartet" : "Fragen warten"} auf die Wiederholung. Ein paar Minuten reichen.`
+      : streak > 1 && d <= 1
+        ? `Dein ${streak}-Tage-Streak wartet. Eine Lektion dauert nur ein paar Minuten.`
+        : "Ein paar Minuten reichen schon, um dranzubleiben.",
   };
 }
 
-/** Termine der nächsten 7 Tage zur gewählten Uhrzeit, heute nur, wenn noch offen und das Ziel nicht erreicht ist. */
+/** Termine der nächsten 30 Tage zur gewählten Uhrzeit, heute nur, wenn noch offen und das Ziel nicht erreicht ist. */
 function upcoming(time, stats) {
   const [hh, mm] = time.split(":").map(Number);
   const done = (stats?.xp_today || 0) >= (stats?.goal || 1);
@@ -44,8 +51,8 @@ function upcoming(time, stats) {
     const at = new Date(now);
     at.setDate(now.getDate() + d);
     at.setHours(hh, mm, 0, 0);
-    return { id, at };
-  }).filter(({ at }, d) => at > now && !(d === 0 && done));
+    return { id, at, d };
+  }).filter(({ at, d }) => at > now && !(d === 0 && done));
 }
 
 /** Nach jedem Start und jeder Lektion: Erinnerungen neu planen. */
@@ -58,8 +65,7 @@ export async function syncReminder(stats) {
     if (mobile()) {
       await n.cancel(IDS);
       if (!time) return;
-      const t = text(stats);
-      for (const { id, at } of upcoming(time, stats)) n.sendNotification({ id, ...t, schedule: n.Schedule.at(at, false, true) });
+      for (const { id, at, d } of upcoming(time, stats)) n.sendNotification({ id, ...text(stats, d), schedule: n.Schedule.at(at, false, true) });
       return;
     }
     const next = time && upcoming(time, stats)[0];

@@ -750,12 +750,18 @@ function editCourse(c) {
     s.close();
     const ok = await confirmSheet({
       title: `„${c.name}“ löschen?`,
-      text: "Alle Einheiten, Fragen und dein Fortschritt in diesem Kurs werden gelöscht. Das lässt sich nicht rückgängig machen.",
+      text: c.shared
+        ? "Alle Einheiten und Fragen in diesem Kurs werden gelöscht, dazu dein Fortschritt und der aller, mit denen du ihn teilst. Das lässt sich nicht rückgängig machen."
+        : "Alle Einheiten, Fragen und dein Fortschritt in diesem Kurs werden gelöscht. Das lässt sich nicht rückgängig machen.",
       confirm: "Endgültig löschen",
       danger: true,
     });
     if (!ok) return;
-    await call("delete_course", { id: c.id });
+    try {
+      await call("delete_course", { id: c.id });
+    } catch (e) {
+      return fail(e);
+    }
     await loadCourses();
     emit("course-updated", c.id);
     emit("courses");

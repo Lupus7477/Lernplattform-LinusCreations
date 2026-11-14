@@ -14,8 +14,11 @@ const TIERS = [
   { id: "kompakt", label: "Kompakt (Qwen3.5 2B, 1,3 GB)", size: 1280835840 },
   { id: "ausgewogen", label: "Ausgewogen (Qwen3.5 4B, 2,7 GB)", size: 2740937888 },
 ];
-let ai = { state: q.get("ai") === "ready" ? "ready" : "downloading", done: 0, total: TIERS[1].size, tier: "ausgewogen", label: TIERS[1].label, loaded: false };
-if (ai.state !== "ready") {
+// ?ai=ready: KI da, ?ai=missing: noch nicht geladen (die App fragt erst), sonst: lädt gerade
+const aiStart = q.get("ai") === "ready" ? "ready" : q.get("ai") === "missing" ? "missing" : "downloading";
+let ai = { state: aiStart, done: 0, total: TIERS[1].size, size: TIERS[1].size, tier: "ausgewogen", label: TIERS[1].label, loaded: false };
+function download() {
+  ai = { ...ai, state: "downloading", done: 0 };
   const t = setInterval(() => {
     ai.done = Math.min(ai.total, ai.done + ai.total / 14);
     if (ai.done >= ai.total) {
@@ -25,6 +28,7 @@ if (ai.state !== "ready") {
     fire("ai-status", { ...ai });
   }, 450);
 }
+if (ai.state === "downloading") download();
 
 /** SWOT-Grafik wie aus einer Folie: Feldtitel übermalt, die Stichpunkte bleiben stehen. */
 function swotImage() {
@@ -130,10 +134,14 @@ const db = {
   lessons: q.has("empty")
     ? []
     : [
-        { unit_id: 1, xp: 22, at: now() - 1 * DAY },
-        { unit_id: 2, xp: 17, at: now() - 2 * DAY },
-        { unit_id: 1, xp: 25, at: now() - 4 * DAY },
+        { unit_id: 1, xp: 22, correct: 7, total: 9, at: now() - 1 * DAY },
+        { unit_id: 2, xp: 17, correct: 5, total: 8, at: now() - 2 * DAY },
+        { unit_id: 1, xp: 25, correct: 6, total: 9, at: now() - 4 * DAY },
       ],
+  // Motivation: Erfolge (id → Zeitpunkt), Pausentage auf Vorrat
+  // Erfolge: „Kurs:id“ pro Kurs, „id“ allgemein
+  badges: q.has("empty") ? {} : { "1:first": now() - 4 * DAY },
+  freezes: 1,
   nextId: 100,
 };
 if (q.has("empty")) db.units = [];
@@ -160,7 +168,48 @@ function streak() {
   for (let i = 1; i < days.length && days[i - 1] - days[i] === 1; i++) n++;
   return n;
 }
-function stats() {
+// Wie core/src/learn.rs (level, title) und core/src/motivation.rs (Auszug der Erfolge)
+const TITLES = ["Erste Schritte", "Neugierig", "Wissbegierig", "Fleißig", "Sattelfest", "Kenntnisreich", "Souverän", "Meisterhaft", "Brillant", "Legendär"];
+function level(xp) {
+  let lvl = 1;
+  for (;;) {
+    const need = 40 + 20 * (lvl - 1);
+    if (lvl >= 100 || xp < need) return [lvl, xp, need];
+    xp -= need;
+    lvl++;
+  }
+}
+// Titel und Erfolgsnamen pro Kurs: im Kern schreibt sie die KI passend zum Kursnamen, im Mock stehen Beispiele mit {course}.
+// Wie die KI sie jetzt schreibt: Stufen, die man im Fach durchläuft (hier VWL), nicht „{Kurs}-Irgendwas“
+const STAGES = ["Erstsemester", "Tutor", "Werkstudent", "Junior-Analyst", "Analyst", "Ökonom", "Senior-Ökonom", "Chefvolkswirt", "Wirtschaftsweiser", "Nobelpreis-Anwärter"];
+const BADGES = [
+  { id: "first", title: "Los geht's", ai: "Erste {course}-Schritte", desc: "Schließe deine erste Lektion in diesem Kurs ab.", icon: "star-fill", global: false },
+  { id: "ten", title: "Dranbleiben", ai: "{course}-Dauerbrenner", desc: "Schließe 10 Lektionen in diesem Kurs ab.", icon: "cards", global: false },
+  { id: "perfect", title: "Fehlerfrei", ai: "Makellos in {course}", desc: "Schaffe eine Lektion mit mindestens 5 Aufgaben ohne Fehler.", icon: "sparkle", global: false },
+  { id: "run10", title: "Im Fluss", ai: "{course}-Flow", desc: "Beantworte 10 Aufgaben hintereinander richtig.", icon: "fire-fill", global: false },
+  { id: "level10", title: "Level 10", ai: "{course}-Ass", desc: "Erreiche Level 10 in diesem Kurs.", icon: "trophy", global: false },
+  { id: "week", title: "Eine Woche", desc: "Lerne 7 Tage in Folge.", icon: "calendar-blank", global: true },
+  { id: "comeback", title: "Wieder da", desc: "Lerne nach ein paar Tagen Pause weiter. Pausen gehören dazu.", icon: "arrow-clockwise", global: true },
+];
+const courseName = (id) => db.courses.find((c) => c.id === id)?.name;
+const courseOf = (l) => l.course_id ?? db.units.find((u) => u.id === l.unit_id)?.course_id ?? null;
+const badgeKey = (b, courseId) => (b.global ? b.id : `${courseId}:${b.id}`);
+const badgeOut = (b, courseId) => ({
+  id: b.id,
+  title: b.global || courseId == null ? b.title : b.ai.replace("{course}", courseName(courseId)),
+  desc: b.desc,
+  icon: b.icon,
+  global: b.global,
+  at: db.badges[badgeKey(b, courseId)] ?? null,
+});
+function courseLevel(courseId) {
+  const [lvl, inLevel, need] = level(db.lessons.filter((l) => courseId == null || courseOf(l) === courseId).reduce((a, l) => a + l.xp, 0));
+  const name = courseName(courseId);
+  const titleAt = (n) => (name ? STAGES : TITLES)[Math.min(9, Math.floor((n - 1) / 10))];
+  const next = (Math.floor((lvl - 1) / 10) + 1) * 10 + 1;
+  return { level: lvl, level_xp: inLevel, level_need: need, title: titleAt(lvl), next_title: next <= 91 ? { level: next, title: titleAt(next) } : null };
+}
+function stats(courseId = null) {
   const xpOn = (d) => db.lessons.filter((l) => new Date(l.at * 1000).toLocaleDateString("sv-SE") === d).reduce((a, l) => a + l.xp, 0);
   const week = [6, 5, 4, 3, 2, 1, 0].map((o) => ({ day: day(o), xp: xpOn(day(o)) }));
   return {
@@ -168,10 +217,16 @@ function stats() {
     xp_today: week[6].xp,
     goal: db.goal,
     total_xp: db.lessons.reduce((a, l) => a + l.xp, 0),
-    lessons: db.lessons.length,
+    lessons: db.lessons.filter((l) => l.main !== false).length,
     due: visible().filter((x) => x.box > 0 && x.due_at <= now()).length,
     week,
     active_days: [...new Set(db.lessons.map((l) => new Date(l.at * 1000).toLocaleDateString("sv-SE")))],
+    ...courseLevel(courseId),
+    best_streak: Math.max(streak(), q.has("empty") ? 0 : 4),
+    freezes: db.freezes,
+    frozen_days: q.has("empty") ? [] : [day(3)],
+    accuracy: Math.round((100 * db.lessons.reduce((a, l) => a + (l.correct ?? 0), 0)) / Math.max(1, db.lessons.reduce((a, l) => a + (l.total ?? 0), 0))),
+    notice: null,
   };
 }
 const shuffle = (a) => [...a].sort(() => Math.random() - 0.5);
@@ -260,10 +315,10 @@ let mockBattle = null;
 const handlers = {
   ai_status: () => ({ ...ai }),
   ai_tiers: () => TIERS,
-  ai_retry: () => null,
+  ai_retry: () => (ai.state === "ready" || ai.state === "downloading" ? null : download()),
   ai_set_tier: ({ tier }) => {
     const t = TIERS.find((x) => x.id === tier);
-    ai = { ...ai, tier, label: t.label, total: t.size };
+    ai = { ...ai, tier, label: t.label, total: t.size, size: t.size };
     fire("ai-status", { ...ai });
   },
   courses: () =>
@@ -365,7 +420,8 @@ const handlers = {
       }),
   unit: ({ unitId }) => {
     const u = db.units.find((x) => x.id === unitId);
-    return { ...u, orga: u.orga ?? 0, exam: u.exam ?? [], document: db.documents.find((d) => d.id === u.document_id).name, explanation: u.explanation ?? null, terms: db.terms.filter((t) => t.unit_id === unitId).map((t) => ({ ...t, unit_title: u.title })) };
+    const text = `${u.title}\n\n${u.summary}\n\nAuf diesen Folien steht der ausführliche Stoff zum Thema, so wie er im Skript steht. Hier kannst du nachlesen, was die KI zusammengefasst hat.`;
+    return { ...u, text, orga: u.orga ?? 0, exam: u.exam ?? [], document: db.documents.find((d) => d.id === u.document_id).name, explanation: u.explanation ?? null, terms: db.terms.filter((t) => t.unit_id === unitId).map((t) => ({ ...t, unit_title: u.title })) };
   },
   search_terms: ({ query }) => db.terms.filter((t) => (t.term + t.definition).toLowerCase().includes(query.toLowerCase())).map((t) => ({ ...t, unit_title: db.units.find((u) => u.id === t.unit_id).title })),
   explain: async ({ unitId, onToken }) => {
@@ -397,8 +453,12 @@ const handlers = {
     const { correct, solution = null } = ["sort", "order", "cloze", "label"].includes(x.kind) ? grade(x, given) : { correct: norm(given) === norm(x.answer) };
     if (!retry) {
       x.wrong = !correct;
-      x.box = correct ? Math.min(5, x.box + 1) : 1;
-      x.due_at = now() + [0, 1, 3, 7, 14, 30][x.box] * DAY;
+      // wie im Kern: richtig, aber noch nicht fällig → Box und Termin bleiben
+      if (!(correct && x.box > 0 && x.due_at > now())) {
+        x.box = correct ? Math.min(5, x.box + 1) : 1;
+        x.due_at = now() + [0, 1, 3, 7, 14, 30][x.box] * DAY;
+      }
+      db.answered = (db.answered || []).filter((a) => a.id !== questionId).concat({ id: questionId, correct });
     }
     return { correct, expected: x.answer, why: x.why, solution };
   },
@@ -433,12 +493,41 @@ const handlers = {
     { name: "Ich", me: true, xp: 190, battles: 4, wins: 2 },
     { name: "Lea", me: false, xp: 75, battles: 0, wins: 0 },
   ],
-  stats: () => stats(),
-  finish_lesson: ({ unitId, correct, total }) => {
-    const xp = 2 * correct + 5 + (total > 0 && correct >= total ? 5 : 0);
-    db.lessons.push({ unit_id: unitId, xp, at: now() });
-    return { xp, stats: stats() };
+  stats: ({ courseId = null } = {}) => stats(courseId),
+  // Wie im Kern: richtig/gesamt aus den Erstantworten (verbraucht), Zuordnen-Runde vom Client. Mock: alles im Hauptkurs.
+  finish_lesson: ({ unitId, bestRun = 0, courseId = null, matched = null, partial = false }) => {
+    const answered = db.answered || [];
+    db.answered = [];
+    const course = db.units.find((u) => u.id === unitId)?.course_id ?? courseId ?? db.units.find((u) => u.id === db.questions.find((x) => x.id === answered[0]?.id)?.unit_id)?.course_id ?? null;
+    const correct = answered.filter((a) => a.correct).length + (matched === true ? 1 : 0);
+    const total = answered.length + (matched == null ? 0 : 1);
+    const before = [...db.lessons].reverse().find((l) => unitId != null && l.unit_id === unitId && l.total && l.main !== false);
+    const was = stats(course);
+    const xp = !total ? 0 : 2 * correct + (partial ? 0 : 5 + (correct >= total ? 5 : 0));
+    if (total) db.lessons.push({ unit_id: unitId, course_id: course, xp, correct, total, at: now(), main: !partial });
+    const s = stats(course);
+    if (partial || !total) return { xp, correct, total, stats: s, level_up: s.level > was.level, badges: [], before: null, next: null, cheer: "" };
+    // Mock: „Im Fluss“ schon ab 3 in Folge, damit man die Erfolgs-Chips sieht
+    const won = BADGES.filter((b) => course != null && !b.global && !db.badges[badgeKey(b, course)] && ((b.id === "perfect" && total >= 5 && correct >= total) || (b.id === "run10" && bestRun >= 3)));
+    won.forEach((b) => (db.badges[badgeKey(b, course)] = now()));
+    const fresh = won.map((b) => badgeOut(b, course));
+    const next = db.units.find((u) => u.status === "ready" && u.id !== unitId && !db.lessons.some((l) => l.unit_id === u.id));
+    const acc = Math.round((100 * correct) / Math.max(1, total));
+    const level_up = s.level > was.level;
+    const cheer = level_up
+      ? `Level ${s.level} erreicht: ${s.title}. Stark!`
+      : fresh.length
+        ? `Neuer Erfolg: ${fresh[0].title}. Verdient!`
+        : before && acc > Math.round((100 * before.correct) / before.total)
+          ? `Besser als beim letzten Mal in „${db.units.find((u) => u.id === unitId)?.title}“. Das ist echter Fortschritt.`
+          : total > 0 && correct >= total
+            ? "Fehlerfrei. Das sitzt!"
+            : acc < 50
+              ? "Drangeblieben, obwohl es schwer war. Genau so lernt man."
+              : "Lektion geschafft. Gut gemacht!";
+    return { xp, correct, total, stats: s, level_up, badges: fresh, before: before ? { correct: before.correct, total: before.total } : null, next: next ? { unit_id: next.id, title: next.title, why: "Als Nächstes im Lernpfad" } : null, cheer };
   },
+  badges: ({ courseId = null } = {}) => BADGES.filter((b) => b.global || courseId != null).map((b) => badgeOut(b, courseId)),
   set_goal: ({ xp }) => (db.goal = xp),
   retry_questions: () => null,
   unit_questions: ({ unitId }) => db.questions.filter((x) => x.unit_id === unitId).map(full),
@@ -560,6 +649,17 @@ function storeFigures(documentId, figures) {
 
 class Channel {
   onmessage = null;
+}
+
+// Erfolgsfragen wie im Kern, im Mock schon ab Box 2 (sonst gäbe es in den Beispieldaten keine)
+{
+  const plain = handlers.start_lesson;
+  handlers.start_lesson = (a) => {
+    const r = plain(a);
+    if (!r.ready) return { ...r, boost: [], cheers: [] };
+    const known = visible().filter((x) => x.box >= 2 && ["mc", "true_false", "fill_blank"].includes(x.kind) && !r.exercises.some((e) => e.id === x.id));
+    return { ...r, boost: shuffle(known).slice(0, 3).map(toExercise), cheers: ["Siehst du, das sitzt!", "Na also, das kannst du.", "Genau, das hast du drauf."] };
+  };
 }
 
 window.__TAURI__ = {

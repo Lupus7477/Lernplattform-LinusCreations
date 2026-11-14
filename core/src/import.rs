@@ -418,7 +418,7 @@ fn grounded(q: &Question, text: &str) -> bool {
 }
 
 /// JSON-Antwort mit einer Grammatik, die erst zur Laufzeit feststeht (Enums aus der Aufgabe).
-fn ask_json<T: DeserializeOwned>(ai: &Ai, user: String, schema: &Value, max_tokens: usize) -> Result<T, AiError> {
+pub(crate) fn ask_json<T: DeserializeOwned>(ai: &Ai, user: String, schema: &Value, max_tokens: usize) -> Result<T, AiError> {
     let g = llama_cpp_2::json_schema_to_grammar(&schema.to_string()).map_err(|e| AiError::Failed(format!("Grammatik: {e}")))?;
     let raw = ai.generate_background(
         Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(&g), max_tokens, temperature: 0.1 },
@@ -495,7 +495,8 @@ pub fn verify_task(ai: &Ai, text: &str, q: Question) -> Result<Option<Question>,
     }
 }
 
-/// Nach dem Ersetzen eines PDFs: Stimmt die Frage noch? Die KI löst sie blind am neuen Text; weicht ihre Antwort ab, ist sie veraltet (None).
+/// Stimmt die Frage? Die KI löst sie blind am Text; weicht ihre Antwort ab, ist sie falsch oder veraltet (None).
+/// Läuft nach dem Schreiben neuer Fragen (Selbstprüfung) und nach dem Ersetzen eines PDFs.
 /// Strukturaufgaben laufen durch die Selbstprüfung (Matrix darf Aussagen verlieren), Grafik-Aufgaben bleiben.
 pub fn recheck(ai: &Ai, text: &str, q: Question) -> Result<Option<Question>, AiError> {
     if !matches!(q.kind.as_str(), "mc" | "true_false" | "fill_blank") {
@@ -697,6 +698,7 @@ pub fn spawn_worker(db: Db, ai: Arc<Ai>, wake: Receiver<()>, notify: impl Fn(i64
             Task::Focus { unit_id, .. } => format!("Prüfungsthemen Einheit {unit_id}"),
             Task::Questions { unit_id, level, .. } => format!("Fragen Einheit {unit_id} (Stufe {level})"),
             Task::Recheck { unit_id, .. } => format!("Prüfung Einheit {unit_id}"),
+            Task::Motivation { course_id, part } => format!("Motivation Kurs {course_id} „{part}“"),
         };
         match run_task(&db, &ai, task, &notify) {
             Ok(course_id) => {
@@ -784,7 +786,23 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
             Ok(course_id)
         }
         Task::Questions { unit_id, level, text, topics } => {
-            let result = generate_questions(ai, &text, level, &topics);
+            // Selbstprüfung auch für MC, Richtig/Falsch und Lücke (ohne Datenbank-Sperre): Die KI löst jede Frage blind am Text,
+            // weicht sie ab, fliegt die Frage. Scheitert die Prüfung selbst, bleibt die Frage (wie beim Ersetzen eines PDFs).
+            let result = generate_questions(ai, &text, level, &topics).and_then(|qs| {
+                let mut kept = Vec::new();
+                for q in qs {
+                    match recheck(ai, &text, q.clone()) {
+                        Ok(Some(q)) => kept.push(q),
+                        Ok(None) => eprintln!("[import] Selbstprüfung verworfen: {}", q.prompt),
+                        Err(AiError::NotReady) => return Err(AiError::NotReady),
+                        Err(AiError::Failed(e)) => {
+                            eprintln!("[import] Selbstprüfung Einheit {unit_id}: {e}");
+                            kept.push(q);
+                        }
+                    }
+                }
+                Ok(kept)
+            });
             let course_id = {
                 let conn = db.lock().unwrap();
                 let course_id: i64 = conn.query_row("SELECT course_id FROM units WHERE id = ?1", [unit_id], |r| r.get(0)).unwrap_or(0);
@@ -866,6 +884,15 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
             let _ = conn.execute("UPDATE units SET q_state = 1, q_level = MAX(q_level - 1, 0) WHERE id = ?1 AND q_state = 4", [unit_id]);
             Ok(course_id)
         }
+        // Titel und Erfolgsnamen: Kurs melden, damit Profil und Pfad die neuen Namen zeigen. Texte: nichts neu zu laden (0).
+        Task::Motivation { course_id, part } if part == crate::motivation::NAMES => crate::motivation::write_names(db, ai, course_id).map(|n| {
+            eprintln!("[import] Motivation Kurs {course_id}: {n} Namen übernommen");
+            course_id
+        }),
+        Task::Motivation { course_id, part } => crate::motivation::write(db, ai, course_id, part).map(|n| {
+            eprintln!("[import] Motivation Kurs {course_id} „{part}“: {n} Texte übernommen");
+            0
+        }),
     }
 }
 

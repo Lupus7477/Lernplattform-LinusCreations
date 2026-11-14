@@ -172,6 +172,7 @@ async fn run() -> Result<(), String> {
     let core = tokio::task::spawn_blocking(move || {
         Core::open(
             &data,
+            true,
             move |s| {
                 let _ = ai_tx.send(Ev { name: "ai-status", data: serde_json::to_string(s).unwrap_or_default(), course: None });
             },

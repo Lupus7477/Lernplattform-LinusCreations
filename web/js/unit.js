@@ -24,6 +24,11 @@ export async function render(id) {
       )
     : null;
 
+  // Das Original zum Nachlesen: Zusammenfassung, Begriffe und Fragen der KI lassen sich daran prüfen
+  const source = u.text
+    ? h("details.card.q-box", h("summary", h("h2", "Originaltext aus dem Skript"), icon("caret-down")), h("div.source-text", u.text))
+    : null;
+
   const course = state.courses?.find((c) => c.id === u.course_id);
   return h(
     "div.page",
@@ -34,11 +39,15 @@ export async function render(id) {
     u.orga ? orgaNote(u, course?.mine) : null,
     h("a.btn.block", { href: `#/lesson/${u.id}` }, "Lektion starten"),
     terms,
+    source,
     questionList(u.id, !!state.courses?.find((c) => c.id === u.course_id)?.shared),
     explainBox,
     h("button.btn.secondary", { type: "button", onclick: () => openChat(u.id, u.title) }, icon("chat-circle-dots"), "Frag die KI"),
   );
 }
+
+/** KI noch nicht heruntergeladen (die App lädt sie erst auf Wunsch): wo das geht. */
+const aiMissing = () => (state.ai?.state === "missing" ? "Die KI ist auf diesem Gerät noch nicht heruntergeladen. Das geht im Profil unter „KI auf diesem Gerät“." : null);
 
 /** Seiten mit Organisatorischem, die nicht abgefragt werden; der Besitzer kann sie zurückholen. */
 function orgaNote(u, mine) {
@@ -64,7 +73,7 @@ function orgaNote(u, mine) {
 
 async function explain(unitId, box, done) {
   if (state.ai?.state !== "ready") {
-    box.replaceChildren(h("p.muted", "Die KI wird noch eingerichtet. Sobald der Download fertig ist, kann sie erklären."));
+    box.replaceChildren(h("p.muted", aiMissing() ?? "Die KI wird noch eingerichtet. Sobald der Download fertig ist, kann sie erklären."));
     return;
   }
   let text = "";
@@ -110,7 +119,7 @@ export function openChat(unitId, title, seed) {
     send.disabled = true;
     if (state.ai?.state !== "ready") {
       bubble.classList.remove("typing");
-      bubble.textContent = "Die KI wird noch eingerichtet. Versuch es gleich nochmal.";
+      bubble.textContent = aiMissing() ?? "Die KI wird noch eingerichtet. Versuch es gleich nochmal.";
       send.disabled = false;
       return;
     }

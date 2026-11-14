@@ -4,7 +4,8 @@ import { h, icon } from "./ui.js";
 import { loadCourses, loadStats, subscribe } from "./state.js";
 
 export async function render() {
-  const [stats, courses] = await Promise.all([loadStats(), loadCourses()]);
+  const courses = await loadCourses();
+  const stats = await loadStats(); // nach den Kursen: gilt für den gewählten Kurs
   const results = h("div.terms", { "aria-live": "polite" });
   const search = h("input.input", { id: "term-search", type: "search", autocomplete: "off", placeholder: "z. B. Elastizität" });
 

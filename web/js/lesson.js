@@ -1,6 +1,6 @@
 // Lektion: eine Aufgabe nach der anderen, Prüfen ohne KI, falsche Aufgaben kommen am Ende erneut.
-import { call } from "./api.js";
-import { confetti, confirmSheet, countUp, flip, h, icon, openSheet, reduceMotion, shake, sound, toast, zoomable } from "./ui.js";
+import { call, stream } from "./api.js";
+import { confetti, confirmSheet, countUp, flip, h, icon, markdown, openSheet, pref, reduceMotion, shake, sound, toast, zoomable } from "./ui.js";
 import { emit, state, subscribe } from "./state.js";
 import { editQuestion, openChat } from "./unit.js";
 import { fail, openReport } from "./report.js";
@@ -50,8 +50,14 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   let queue = [];
   let total = 0;
   let solved = 0;
-  let firstRight = 0;
+  let firsts = 0; // beantwortete Aufgaben (erster Versuch), für „Beenden“: XP bis hierher
+  let matched = null; // Zuordnen-Runde beim ersten Versuch geschafft? (die einzige Aufgabe, die der Server nicht selbst prüft)
   let run = 0;
+  let bestRun = 0;
+  let miss = 0; // falsch in Folge, nur normale Aufgaben (Erfolgsfragen zählen nicht)
+  const missed = []; // diese Fehler, für die Erklär-Folie
+  let boosts = []; // Erfolgsfragen: sitzen schon, kommen nach je 2 Fehlern in Folge
+  let cheers = []; // Lob nach einer richtigen Erfolgsfrage
   let cur = null;
   let lastOk = false;
   let phase = "loading"; // answer | checking | feedback | done
@@ -471,7 +477,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     body.classList.toggle("fit", !!cur.view.fit);
     body.replaceChildren(
       ...[
-        h("div.q-head", h("p.q-kind", ex.retry ? `Nochmal: ${label}` : ex.refresh ? `Auffrischen: ${label}` : label), cur.view.tools),
+        h("div.q-head", h("p.q-kind", ex.boost ? `Zwischendurch: ${label}` : ex.retry ? `Nochmal: ${label}` : ex.refresh ? `Auffrischen: ${label}` : label), cur.view.tools),
         ["fill_blank", "cloze", "match"].includes(ex.kind) ? null : h("h1.q-prompt", ex.prompt),
         cur.view.el,
       ].filter(Boolean),
@@ -497,7 +503,9 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     setReady(false);
     try {
       const text = typeof given === "string" ? given : JSON.stringify(given);
-      const res = battleId ? await call("battle_answer", { battleId, idx: cur.ex.idx, given: text }) : await call("answer", { questionId: cur.ex.id, given: text, retry: !!cur.ex.retry });
+      // Erfolgsfragen wie „Nochmal“ prüfen: die Box bleibt, sie sitzen ja schon
+      const res = battleId ? await call("battle_answer", { battleId, idx: cur.ex.idx, given: text }) : await call("answer", { questionId: cur.ex.id, given: text, retry: !!(cur.ex.retry || cur.ex.boost) });
+      cur.solution = res.solution;
       cur.view.mark(res.correct, res.expected, res.solution);
       verdict(res.correct, res.expected, res.why);
     } catch (e) {
@@ -510,21 +518,36 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   function verdict(ok, expected, why) {
     phase = "feedback";
     lastOk = ok;
+    const ex = cur.ex;
+    if (!ex.boost && !ex.retry) {
+      firsts++;
+      if (ex.kind === "match") matched = ok;
+    }
+    // Erfolgsfragen zählen weder zum Fortschritt noch zu den XP und kommen nicht nochmal, sie geben nur ein Erfolgserlebnis.
     if (ok) {
-      if (!cur.ex.retry) firstRight++;
-      solved++;
+      if (!ex.boost) {
+        solved++;
+        miss = 0;
+        missed.length = 0;
+      }
       run++;
-      if (cur.ex.kind !== "match") sound.right();
+      bestRun = Math.max(bestRun, run);
+      if (ex.kind !== "match") sound.right();
     } else {
       run = 0;
-      if (cur.ex.kind !== "match") sound.wrong();
+      if (ex.kind !== "match") sound.wrong();
       if (battleId) solved++; // im Battle zählt jede Aufgabe einmal, kein „Nochmal“
-      else queue.push({ ...cur.ex, retry: true });
+      else if (!ex.boost) {
+        queue.push({ ...ex, retry: true });
+        if (ex.id) missed.push(`Frage: ${ex.prompt}\nRichtig: ${expected || (cur.solution ? JSON.stringify(cur.solution) : "–")}`.slice(0, 250));
+        // Pechsträhne: nach je 2 Fehlern in Folge eine Frage, die schon sitzt
+        if (++miss % 2 === 0 && boosts.length) queue.unshift(boosts.shift());
+      }
     }
     updateProgress();
 
     const nextBtn = h(`button.btn.${ok ? "right" : "wrong"}`, { type: "button", onclick: next }, "Weiter");
-    const ex = cur.ex;
+    const praise = ex.boost && cheers.length ? cheers : PRAISE;
     const whyBtn =
       !ok && ex.id && !battleId
         ? h("button.btn.secondary", {
@@ -540,7 +563,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     fb.replaceChildren(
       h(
         "div.inner",
-        h("h2", icon(ok ? "check-circle-fill" : "x-circle-fill"), ok ? PRAISE[Math.floor(Math.random() * PRAISE.length)] : "Nicht ganz"),
+        h("h2", icon(ok ? "check-circle-fill" : "x-circle-fill"), ok ? praise[Math.floor(Math.random() * praise.length)] : "Nicht ganz"),
         !ok && expected && CLASSIC.includes(ex.kind) ? h("p.detail", "Richtig ist: ", h("b", expected)) : null,
         why ? h("p.why", why) : null,
         h("div.actions", whyBtn, nextBtn),
@@ -563,9 +586,45 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     fb.classList.remove("open");
     root.style.setProperty("--cover", "0px");
     body.classList.remove("fit");
+    if (miss >= 4 && !battleId && pref.get("reexplain", "on") === "on" && state.ai?.state === "ready") {
+      miss = 0;
+      return slide(missed.splice(0));
+    }
     if (!queue.length) return total ? finish() : exit();
     cur = { ex: queue.shift() };
     show();
+  }
+
+  /** Erklär-Folie nach 4 Fehlern in Folge: Die KI erklärt den Stoff dahinter einfacher, mit Beispiel und Merksatz. */
+  async function slide(items) {
+    phase = "slide";
+    menuBtn.hidden = true;
+    foot.hidden = false;
+    mainBtn.textContent = "Weiter";
+    setReady(true);
+    const live = h("div.markdown.typing", { "aria-live": "polite" });
+    const more = h("button.btn.secondary.slide-more", { type: "button", hidden: true }, icon("chat-circle-dots"), "Noch anders erklären");
+    body.replaceChildren(h("div.stack", h("p.q-kind", "Kurz erklärt"), h("h1.q-prompt", "Lass es uns anders versuchen"), live, more));
+    body.scrollTop = 0;
+    let unit = unitId;
+    if (unit == null && cur?.ex.id) unit = (await call("question", { questionId: cur.ex.id }).catch(() => null))?.unit_id ?? null;
+    // Anweisung zuerst: Der Kern kürzt lange Nachrichten am Ende.
+    const sent = `Erkläre mir den Stoff hinter diesen Fragen einfacher als im Skript: erst kurz das Prinzip, dann ein Beispiel aus dem Alltag. Schließe mit einer Zeile „**Merke:** …“. Diese Fragen habe ich gerade nacheinander falsch beantwortet:\n\n${items.join("\n\n")}`;
+    let text = "";
+    try {
+      text = await stream("ask", { unitId: unit, messages: [{ role: "user", content: sent }] }, (p) => {
+        text += p;
+        live.textContent = text;
+      });
+      live.replaceChildren(...markdown(text).childNodes);
+      more.hidden = false;
+      more.addEventListener("click", () =>
+        openChat(unit, "", { shown: "Erklär es mir noch anders.", sent: `Du hast mir das gerade so erklärt:\n${text.slice(0, 900)}\n\nErkläre es mir noch einmal mit einem anderen Beispiel, in einfachen Worten.` }),
+      );
+    } catch (e) {
+      live.textContent = String(e);
+    }
+    live.classList.remove("typing");
   }
 
   // ---------- Frage bearbeiten / ausblenden ----------
@@ -654,7 +713,8 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   function drop(ex) {
     if (cur?.ex.id !== ex.id) return;
     queue = queue.filter((e) => e.id !== ex.id);
-    if (!(phase === "feedback" && lastOk)) total = Math.max(0, total - 1);
+    boosts = boosts.filter((e) => e.id !== ex.id);
+    if (!ex.boost && !(phase === "feedback" && lastOk)) total = Math.max(0, total - 1);
     updateProgress();
     advance();
   }
@@ -665,7 +725,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     menuBtn.hidden = true;
     let res;
     try {
-      res = await call("finish_lesson", { unitId, correct: firstRight, total });
+      res = await call("finish_lesson", finishArgs());
     } catch (e) {
       fail(e);
       return exit();
@@ -673,7 +733,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     state.stats = res.stats;
     emit("stats", res.stats);
     const s = res.stats;
-    const acc = Math.round((firstRight / Math.max(1, total)) * 100);
+    const acc = Math.round((res.correct / Math.max(1, res.total)) * 100); // gezählt vom Server
     const secs = Math.round((Date.now() - t0) / 1000);
     const grew = s.streak > streakBefore;
     const goalNow = s.xp_today >= s.goal && s.xp_today - res.xp < s.goal;
@@ -681,11 +741,20 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     const streakText = grew ? (s.streak === 1 ? "Dein Streak beginnt heute." : `${s.streak}. Tag in Folge. Weiter so!`) : `Streak: ${s.streak} ${s.streak === 1 ? "Tag" : "Tage"}`;
     foot.hidden = false;
     combo.classList.add("hide");
+    // Level-Balken füllt sich von „vor der Lektion“ auf „jetzt“ (nach einem Level-Up von 0)
+    const lvlFill = h("i", { style: { "--p": String(res.level_up ? 0 : Math.max(0, s.level_xp - res.xp) / s.level_need) } });
+    const level = h(
+      "div.level-bar",
+      h("div.level-head", h("b", `Level ${s.level} · ${s.title}`), h("span.num", `${s.level_xp} / ${s.level_need} XP`)),
+      h("div.bar", { role: "progressbar", "aria-label": `Level ${s.level}`, "aria-valuemin": "0", "aria-valuemax": String(s.level_need), "aria-valuenow": String(s.level_xp) }, lvlFill),
+    );
+    const was = res.before ? Math.round((res.before.correct / Math.max(1, res.before.total)) * 100) : null;
     body.replaceChildren(
       h(
         "div.done-screen",
         icon("fire-fill", `flame${grew ? " ignite" : ""}`),
         h("h1", unitId ? "Lektion geschafft!" : "Wiederholung geschafft!"),
+        res.cheer ? h("p.cheer", res.cheer) : null,
         h("p.muted", streakText),
         goalNow ? h("p", { style: { "font-weight": "700" } }, icon("target"), " Tagesziel erreicht") : null,
         h(
@@ -694,8 +763,19 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
           h("div", h("b", `${acc} %`), h("span", "Treffer")),
           h("div", h("b", `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`), h("span", "Zeit")),
         ),
+        // Nur Fortschritt zeigen: Ein schlechterer Tag soll die Lektion nicht abwerten.
+        was != null && acc > was ? h("p.compare", `Letztes Mal ${was} %, heute ${acc} %`) : null,
+        res.level_up ? h("p.level-up", icon("star-fill"), `Level ${s.level} erreicht`) : null,
+        level,
+        res.badges?.length
+          ? h("div.new-badges", h("p.q-kind", res.badges.length === 1 ? "Neuer Erfolg" : "Neue Erfolge"), h("div.badge-row", res.badges.map((b) => h("span.badge", { title: b.desc }, icon(b.icon), b.title))))
+          : null,
+        res.next ? h("a.btn.secondary.block", { href: `#/lesson/${res.next.unit_id}` }, `Weiter mit: ${res.next.title}`) : null,
+        res.next ? h("p.hint", res.next.why) : null,
       ),
     );
+    requestAnimationFrame(() => requestAnimationFrame(() => lvlFill.style.setProperty("--p", String(s.level_xp / s.level_need))));
+    if (s.notice) toast(s.notice);
     countUp(xpEl, res.xp);
     sound.done();
     if (acc >= 80 || goalNow) confetti();
@@ -731,6 +811,8 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     }
     queue = res.exercises;
     total = queue.length;
+    boosts = (res.boost ?? []).map((e) => ({ ...e, boost: true }));
+    cheers = res.cheers ?? [];
     updateProgress();
     cur = { ex: queue.shift() };
     show();
@@ -875,9 +957,26 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   }
 
   // ---------- Steuerung ----------
-  mainBtn.addEventListener("click", () => (phase === "done" ? exit() : check()));
+  mainBtn.addEventListener("click", () => (phase === "done" ? exit() : phase === "slide" ? advance() : check()));
   closeBtn.addEventListener("click", askClose);
   menuBtn.addEventListener("click", questionMenu);
+
+  /** Richtig/gesamt zählt der Server aus den Antworten. Die tägliche Wiederholung schickt keinen Kurs: Ihre XP zählen in den Kursen der Fragen. */
+  function finishArgs(partial = false) {
+    return { unitId, courseId: wrongCourse ?? examCourse ?? null, bestRun, matched, partial };
+  }
+
+  /** Abgebrochen: Lerntag und XP für das Beantwortete trotzdem gutschreiben (ohne Abschlussseite und Erfolge). */
+  async function saveSoFar() {
+    try {
+      const res = await call("finish_lesson", finishArgs(true));
+      state.stats = res.stats;
+      emit("stats", res.stats);
+      if (res.xp) toast(`+${res.xp} XP gespeichert`);
+    } catch (e) {
+      fail(e);
+    }
+  }
 
   async function askClose() {
     if (battleId && battle?.state === "running" && phase !== "done") {
@@ -888,12 +987,14 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     if (phase === "done" || phase === "loading" || total === 0) return exit();
     const leave = await confirmSheet({
       title: "Lektion beenden?",
-      text: "Deine Antworten sind gespeichert. XP gibt es aber erst, wenn du die Lektion abschließt.",
+      text: firsts ? "Deine Antworten und die XP bis hierher bleiben gespeichert. Den Bonus fürs Abschließen gibt es am Ende." : "Du hast noch nichts beantwortet.",
       confirm: "Beenden",
       cancel: "Weiterlernen",
       danger: true,
     });
-    if (leave) exit();
+    if (!leave) return;
+    if (firsts) saveSoFar();
+    exit();
   }
 
   function onKey(e) {
@@ -902,10 +1003,11 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
       e.preventDefault();
       askClose();
     } else if (e.key === "Enter") {
-      if (e.target instanceof Element && e.target.closest(".feedback, .lesson-top, input, textarea, .piece, .zone-head")) return; // dort reagiert das Element selbst
+      if (e.target instanceof Element && e.target.closest(".feedback, .lesson-top, input, textarea, .piece, .zone-head, .slide-more")) return; // dort reagiert das Element selbst
       e.preventDefault();
       if (phase === "answer") check();
       else if (phase === "feedback") next();
+      else if (phase === "slide") advance();
       else if (phase === "done") exit();
     } else if (/^[1-9]$/.test(e.key) && phase === "answer") {
       cur.view.key?.(Number(e.key));
