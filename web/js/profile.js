@@ -2,7 +2,7 @@
 import { call } from "./api.js";
 import { PASSWORD_RULES } from "./auth.js";
 import { applyTheme, confirmSheet, gb, h, icon, openExternal, openSheet, pref, segmented, toast } from "./ui.js";
-import { aiNotice, emit, loadStats, state, subscribe } from "./state.js";
+import { aiNotice, currentCourse, emit, loadStats, state, subscribe } from "./state.js";
 import { appInfo, fail, openReport } from "./report.js";
 import { canRemind, reminderTime, setReminder } from "./remind.js";
 
@@ -11,7 +11,11 @@ const iso = (d) => d.toLocaleDateString("sv-SE"); // JJJJ-MM-TT in lokaler Zeit
 
 export async function render() {
   const page = h("div.page");
-  const [stats, tiers, about, badges] = await Promise.all([loadStats(), call("ai_tiers"), aboutCard(), call("badges").catch(() => [])]);
+  // Level, Titel und Erfolge gelten pro Kurs: beim Kurswechsel neu laden
+  let stats;
+  let badges;
+  const load = async () => ([stats, badges] = await Promise.all([loadStats(), call("badges", { courseId: currentCourse()?.id ?? null }).catch(() => [])]));
+  const [tiers, about] = await Promise.all([call("ai_tiers"), aboutCard(), load()]);
   // Konto-Karten einmal bauen: das Neuzeichnen bei KI-Statusmeldungen soll nicht jedes Mal den Server fragen.
   const user = state.session?.user;
   const server = user
@@ -19,18 +23,23 @@ export async function render() {
     : window.__TAURI__ && state.session?.mode === "local" ? [connectCard()] : [];
   const draw = () => page.replaceChildren(...content(stats, tiers, server, badges), about);
   draw();
-  page.cleanup = subscribe((kind) => kind === "ai" && draw());
+  page.cleanup = subscribe((kind) => {
+    if (kind === "ai") draw();
+    if (kind === "course-selected") load().then(draw);
+  });
   return page;
 }
 
 function content(s, tiers, server, badges) {
+  const course = currentCourse();
   return [
     h("h1", "Profil"),
     h(
       "div.card.level-card",
       h("div.level-head", h("b.level-num", `Level ${s.level}`), h("span", s.title)),
       h("div.level-bar", h("div.bar", { role: "progressbar", "aria-label": `Level ${s.level}`, "aria-valuemin": "0", "aria-valuemax": String(s.level_need), "aria-valuenow": String(s.level_xp) }, h("i", { style: { "--p": String(s.level_xp / s.level_need) } }))),
-      h("p.muted.num", `Noch ${s.level_need - s.level_xp} XP bis Level ${s.level + 1}. Insgesamt ${s.total_xp} XP aus ${s.lessons} ${s.lessons === 1 ? "Lektion" : "Lektionen"}.`),
+      h("p.muted.num", `Noch ${s.level_need - s.level_xp} XP bis Level ${s.level + 1}${course ? ` in „${course.name}“` : ""}.`),
+      s.next_title ? h("p.hint", `Nächster Titel ab Level ${s.next_title.level}: ${s.next_title.title}`) : null,
     ),
     h(
       "div.card",
@@ -55,15 +64,14 @@ function content(s, tiers, server, badges) {
   ].filter(Boolean);
 }
 
-/** Erfolge: freigeschaltete farbig mit Datum, gesperrte blass mit ihrem Ziel. */
+/** Erfolge: die des Kurses (Namen von der KI) und die allgemeinen. Freigeschaltete farbig mit Datum, gesperrte blass mit ihrem Ziel. */
 function badgeCard(badges) {
   const got = badges.filter((b) => b.at).length;
-  return h(
-    "div.card",
-    h("h2", `Erfolge · ${got} von ${badges.length}`),
+  const ofCourse = badges.filter((b) => !b.global);
+  const grid = (list) =>
     h(
       "div.badge-grid",
-      badges.map((b) =>
+      list.map((b) =>
         h(
           `div.badge-tile${b.at ? "" : ".locked"}`,
           { "aria-label": `${b.title}: ${b.at ? "freigeschaltet" : b.desc}` },
@@ -72,7 +80,13 @@ function badgeCard(badges) {
           h("span", b.at ? `Seit ${new Date(b.at * 1000).toLocaleDateString("de-DE")}` : b.desc),
         ),
       ),
-    ),
+    );
+  return h(
+    "div.card",
+    h("h2", `Erfolge · ${got} von ${badges.length}`),
+    ofCourse.length ? [h("p.q-kind", `In „${currentCourse()?.name ?? "diesem Kurs"}“`), grid(ofCourse)] : null,
+    h("p.q-kind", "Allgemein"),
+    grid(badges.filter((b) => b.global)),
   );
 }
 

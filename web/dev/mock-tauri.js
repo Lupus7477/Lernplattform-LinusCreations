@@ -135,7 +135,8 @@ const db = {
         { unit_id: 1, xp: 25, correct: 6, total: 9, at: now() - 4 * DAY },
       ],
   // Motivation: Erfolge (id → Zeitpunkt), Pausentage auf Vorrat
-  badges: q.has("empty") ? {} : { first: now() - 4 * DAY },
+  // Erfolge: „Kurs:id“ pro Kurs, „id“ allgemein
+  badges: q.has("empty") ? {} : { "1:first": now() - 4 * DAY },
   freezes: 1,
   nextId: 100,
 };
@@ -174,15 +175,36 @@ function level(xp) {
     lvl++;
   }
 }
+// Titel und Erfolgsnamen pro Kurs: im Kern schreibt sie die KI passend zum Kursnamen, im Mock stehen Beispiele mit {course}.
+const STAGES = ["Starter", "Entdecker", "Durchblick", "Kenner", "Profi", "Stratege", "Meister", "Champion", "Legende", "Gott"];
 const BADGES = [
-  { id: "first", title: "Los geht's", desc: "Schließe deine erste Lektion ab.", icon: "star-fill" },
-  { id: "ten", title: "Dranbleiben", desc: "Schließe 10 Lektionen ab.", icon: "cards" },
-  { id: "perfect", title: "Fehlerfrei", desc: "Schaffe eine Lektion mit mindestens 5 Aufgaben ohne Fehler.", icon: "sparkle" },
-  { id: "run10", title: "Im Fluss", desc: "Beantworte 10 Aufgaben hintereinander richtig.", icon: "fire-fill" },
-  { id: "week", title: "Eine Woche", desc: "Lerne 7 Tage in Folge.", icon: "calendar-blank" },
-  { id: "level10", title: "Level 10", desc: "Erreiche Level 10.", icon: "trophy" },
+  { id: "first", title: "Los geht's", ai: "Erste {course}-Schritte", desc: "Schließe deine erste Lektion in diesem Kurs ab.", icon: "star-fill", global: false },
+  { id: "ten", title: "Dranbleiben", ai: "{course}-Dauerbrenner", desc: "Schließe 10 Lektionen in diesem Kurs ab.", icon: "cards", global: false },
+  { id: "perfect", title: "Fehlerfrei", ai: "Makellos in {course}", desc: "Schaffe eine Lektion mit mindestens 5 Aufgaben ohne Fehler.", icon: "sparkle", global: false },
+  { id: "run10", title: "Im Fluss", ai: "{course}-Flow", desc: "Beantworte 10 Aufgaben hintereinander richtig.", icon: "fire-fill", global: false },
+  { id: "level10", title: "Level 10", ai: "{course}-Ass", desc: "Erreiche Level 10 in diesem Kurs.", icon: "trophy", global: false },
+  { id: "week", title: "Eine Woche", desc: "Lerne 7 Tage in Folge.", icon: "calendar-blank", global: true },
+  { id: "comeback", title: "Wieder da", desc: "Lerne nach ein paar Tagen Pause weiter. Pausen gehören dazu.", icon: "arrow-clockwise", global: true },
 ];
-function stats() {
+const courseName = (id) => db.courses.find((c) => c.id === id)?.name;
+const courseOf = (l) => l.course_id ?? db.units.find((u) => u.id === l.unit_id)?.course_id ?? null;
+const badgeKey = (b, courseId) => (b.global ? b.id : `${courseId}:${b.id}`);
+const badgeOut = (b, courseId) => ({
+  id: b.id,
+  title: b.global || courseId == null ? b.title : b.ai.replace("{course}", courseName(courseId)),
+  desc: b.desc,
+  icon: b.icon,
+  global: b.global,
+  at: db.badges[badgeKey(b, courseId)] ?? null,
+});
+function courseLevel(courseId) {
+  const [lvl, inLevel, need] = level(db.lessons.filter((l) => courseId == null || courseOf(l) === courseId).reduce((a, l) => a + l.xp, 0));
+  const name = courseName(courseId);
+  const titleAt = (n) => (name ? `${name}-${STAGES[Math.min(9, Math.floor((n - 1) / 10))]}` : TITLES[Math.min(9, Math.floor((n - 1) / 10))]);
+  const next = (Math.floor((lvl - 1) / 10) + 1) * 10 + 1;
+  return { level: lvl, level_xp: inLevel, level_need: need, title: titleAt(lvl), next_title: next <= 91 ? { level: next, title: titleAt(next) } : null };
+}
+function stats(courseId = null) {
   const xpOn = (d) => db.lessons.filter((l) => new Date(l.at * 1000).toLocaleDateString("sv-SE") === d).reduce((a, l) => a + l.xp, 0);
   const week = [6, 5, 4, 3, 2, 1, 0].map((o) => ({ day: day(o), xp: xpOn(day(o)) }));
   return {
@@ -194,7 +216,7 @@ function stats() {
     due: visible().filter((x) => x.box > 0 && x.due_at <= now()).length,
     week,
     active_days: [...new Set(db.lessons.map((l) => new Date(l.at * 1000).toLocaleDateString("sv-SE")))],
-    ...(([lvl, inLevel, need]) => ({ level: lvl, level_xp: inLevel, level_need: need, title: TITLES[Math.min(9, Math.floor((lvl - 1) / 10))] }))(level(db.lessons.reduce((a, l) => a + l.xp, 0))),
+    ...courseLevel(courseId),
     best_streak: Math.max(streak(), q.has("empty") ? 0 : 4),
     freezes: db.freezes,
     frozen_days: q.has("empty") ? [] : [day(3)],
@@ -461,16 +483,18 @@ const handlers = {
     { name: "Ich", me: true, xp: 190, battles: 4, wins: 2 },
     { name: "Lea", me: false, xp: 75, battles: 0, wins: 0 },
   ],
-  stats: () => stats(),
-  finish_lesson: ({ unitId, correct, total, bestRun = 0 }) => {
+  stats: ({ courseId = null } = {}) => stats(courseId),
+  finish_lesson: ({ unitId, correct, total, bestRun = 0, courseId = null }) => {
+    const course = db.units.find((u) => u.id === unitId)?.course_id ?? courseId;
     const before = [...db.lessons].reverse().find((l) => unitId != null && l.unit_id === unitId && l.total);
-    const was = stats();
+    const was = stats(course);
     const xp = 2 * correct + 5 + (total > 0 && correct >= total ? 5 : 0);
-    db.lessons.push({ unit_id: unitId, xp, correct, total, at: now() });
-    const s = stats();
+    db.lessons.push({ unit_id: unitId, course_id: course, xp, correct, total, at: now() });
+    const s = stats(course);
     // Mock: „Im Fluss“ schon ab 3 in Folge, damit man die Erfolgs-Chips sieht
-    const fresh = BADGES.filter((b) => !db.badges[b.id] && ((b.id === "perfect" && total >= 5 && correct >= total) || (b.id === "run10" && bestRun >= 3)));
-    fresh.forEach((b) => (db.badges[b.id] = now()));
+    const won = BADGES.filter((b) => course != null && !b.global && !db.badges[badgeKey(b, course)] && ((b.id === "perfect" && total >= 5 && correct >= total) || (b.id === "run10" && bestRun >= 3)));
+    won.forEach((b) => (db.badges[badgeKey(b, course)] = now()));
+    const fresh = won.map((b) => badgeOut(b, course));
     const next = db.units.find((u) => u.status === "ready" && u.id !== unitId && !db.lessons.some((l) => l.unit_id === u.id));
     const acc = Math.round((100 * correct) / Math.max(1, total));
     const level_up = s.level > was.level;
@@ -487,7 +511,7 @@ const handlers = {
               : "Lektion geschafft. Gut gemacht!";
     return { xp, stats: s, level_up, badges: fresh, before: before ? { correct: before.correct, total: before.total } : null, next: next ? { unit_id: next.id, title: next.title, why: "Als Nächstes im Lernpfad" } : null, cheer };
   },
-  badges: () => BADGES.map((b) => ({ ...b, at: db.badges[b.id] ?? null })),
+  badges: ({ courseId = null } = {}) => BADGES.filter((b) => b.global || courseId != null).map((b) => badgeOut(b, courseId)),
   set_goal: ({ xp }) => (db.goal = xp),
   retry_questions: () => null,
   unit_questions: ({ unitId }) => db.questions.filter((x) => x.unit_id === unitId).map(full),

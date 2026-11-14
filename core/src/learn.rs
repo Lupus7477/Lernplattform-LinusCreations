@@ -184,7 +184,7 @@ pub fn level(total_xp: i64) -> (i64, i64, i64) {
 }
 
 // ponytail: feste Titel je 10 Level; Wörter frei änderbar.
-const TITLES: [&str; 10] = ["Erste Schritte", "Neugierig", "Wissbegierig", "Fleißig", "Sattelfest", "Kenntnisreich", "Souverän", "Meisterhaft", "Brillant", "Legendär"];
+pub const TITLES: [&str; 10] = ["Erste Schritte", "Neugierig", "Wissbegierig", "Fleißig", "Sattelfest", "Kenntnisreich", "Souverän", "Meisterhaft", "Brillant", "Legendär"];
 
 /// Titel zum Level (je 10 Level ein neuer, Level 100 = der letzte).
 pub fn title(level: i64) -> &'static str {

@@ -41,7 +41,7 @@ export async function loadCourses() {
 }
 
 export async function loadStats() {
-  state.stats = await call("stats");
+  state.stats = await call("stats", { courseId: currentCourse()?.id ?? null }); // Level und Titel des gewählten Kurses
   if (state.stats.notice) toast(state.stats.notice); // gerade eingesetzter Pausentag, kommt nur einmal
   emit("stats", state.stats);
   return state.stats;

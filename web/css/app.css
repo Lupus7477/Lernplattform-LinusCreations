@@ -2628,9 +2628,10 @@ textarea.input {
 }
 .level-head {
   display: flex;
+  flex-wrap: wrap; /* lange Kurs-Titel rutschen unter „Level N“ */
   justify-content: space-between;
   align-items: baseline;
-  gap: 12px;
+  gap: 4px 12px;
 }
 .level-head .num,
 .level-head span {
@@ -2701,6 +2702,9 @@ textarea.input {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   gap: 10px;
+}
+.badge-grid + .q-kind {
+  margin-top: 16px;
 }
 .badge-tile {
   display: grid;

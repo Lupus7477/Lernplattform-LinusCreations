@@ -33,12 +33,20 @@ Die Apps laufen **immer lokal**. Optional verbinden sie sich mit deinem Server (
    - Die Folie lässt sich unter Profil → Einstellungen ausschalten.
 4. **Wiederholen:** Leitner-Boxen (1, 3, 7, 14, 30 Tage). Gemerkte und prüfungsrelevante Fragen kommen zuerst.
 5. **Motivation:** XP, Tagesziel, Streak, Lernstufe je Einheit. Dazu kommt, ganz ohne Strafen und Wartezeiten:
-   - **Level und Titel:** Level 1–100 aus den XP. Von Level n zu n+1 braucht es 40 + 20·(n−1) XP. Alle 10 Level gibt es einen neuen Titel.
+   - **Level und Titel pro Kurs:** Level 1–100 aus den XP dieses Kurses. Von Level n zu n+1 braucht es 40 + 20·(n−1) XP. Alle 10 Level gibt es einen neuen Titel.
+     - Beim Anlegen eines Kurses schreibt die KI 10 Titel passend zum Kursnamen, z. B. „Marketing-Starter“ bis „Marketing-Gott“.
+     - Sie benennt auch die 11 Kurs-Erfolge. Die Bedingungen und ihre Beschreibung kommen vom Code.
+     - Titel und Erfolgsnamen gelten für alle im Kurs gleich. Nach einem Umbenennen schreibt die KI sie neu.
+     - Den Kursnamen setzt der Code über `{course}` ein. So gehen auch Namen wie „Mathe 2“ durch die Ziffern-Prüfung.
+     - Solange die KI nichts geschrieben hat, gilt „Kursname · Stufenwort“.
    - **Rekord und Pausentage:** Das Profil zeigt die längste Serie. Für je 7 Tage in Folge gibt es einen Pausentag, höchstens 2 auf Vorrat. Verpasst du einen Tag, rettet er die Serie automatisch. Der Tag zählt nicht mit und ist im Kalender eine Schneeflocke.
-   - **Erfolge:** 14 Ziele, z. B. erste Lektion, 100 Aufgaben, fehlerfreie Lektion, eine Woche in Folge, Einheit gemeistert, ganzes Skript geübt, prüfungsbereit, „Wieder da“ nach einer Pause. Gesperrte zeigen im Profil, was noch fehlt.
+   - **Erfolge:**
+     - 11 pro Kurs, z. B. erste Lektion, 100 Aufgaben, fehlerfreie Lektion, Einheit gemeistert, ganzes Skript geübt, prüfungsbereit, Level 10.
+     - 3 allgemeine für die Lernserie: eine Woche, ein Monat, „Wieder da“ nach einer Pause.
+     - Gesperrte zeigen im Profil, was noch fehlt.
    - **Abschlussseite:** Sie zeigt den Level-Balken, neue Erfolge, „Letztes Mal x %, heute y %“ (nur bei einer Verbesserung) und „Weiter mit: …“ zur nächsten Einheit. Das ist die nächste ungeübte Einheit, sonst die mit dem niedrigsten Lernstand.
    - **Motivationstexte: die KI schreibt, der Code entscheidet.**
-     - Die KI schreibt im Hintergrund kurze Sätze je Anlass, aber nur, wenn sonst nichts zu tun ist (höchstens 3 Runden je Anlass). Anlässe sind z. B. Level-Up, Erfolg, Rekord, Comeback, besser als letztes Mal und eine schwere Lektion.
+     - Die KI schreibt im Hintergrund pro Kurs kurze Sätze je Anlass, gern mit Bezug zum Thema, aber nur, wenn sonst nichts zu tun ist (höchstens 3 Runden je Anlass). Anlässe sind z. B. Level-Up, Erfolg, Rekord, Comeback, besser als letztes Mal und eine schwere Lektion.
      - Der Code verwirft jeden Satz mit Ziffern (Zahlen kommen nur über Platzhalter), mit fremden Platzhaltern oder mit Druckwörtern.
      - Welcher Anlass gerade passt, entscheidet der Code. Ist die KI noch nicht bereit, kommen feste Sätze.
 

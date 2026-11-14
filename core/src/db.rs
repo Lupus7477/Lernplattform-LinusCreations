@@ -135,6 +135,29 @@ CREATE INDEX cheers_occasion ON cheers(occasion);
 PRAGMA user_version = 6;
 ";
 
+/// Version 7: Motivation pro Kurs. `lessons.course_id` = Kurs der Lektion (auch Falsch- und Prüfungsrunden ohne Einheit).
+/// `courses.motivation` = von der KI geschriebene, vom Code geprüfte Titel und Erfolgsnamen als JSON (NULL = noch nicht geschrieben).
+/// `course_badges` = Erfolge je Kurs; `badges` behält nur die allgemeinen (Serie). `cheers` gehören jetzt zu einem Kurs.
+/// `motivation_rounds` = KI-Runden je Kurs und Teil („names“ oder Anlass), damit der Worker nie endlos wiederholt.
+const V7: &str = "
+ALTER TABLE lessons ADD COLUMN course_id INTEGER REFERENCES courses(id) ON DELETE SET NULL;
+UPDATE lessons SET course_id = (SELECT course_id FROM units WHERE units.id = lessons.unit_id);
+CREATE INDEX lessons_course ON lessons(user_id, course_id);
+ALTER TABLE courses ADD COLUMN motivation TEXT;
+CREATE TABLE course_badges(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE, id TEXT NOT NULL, at INTEGER NOT NULL,
+  PRIMARY KEY(user_id, course_id, id)) WITHOUT ROWID;
+DELETE FROM badges WHERE id NOT IN ('week', 'month', 'comeback');
+DROP TABLE cheers;
+CREATE TABLE cheers(id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  occasion TEXT NOT NULL, text TEXT NOT NULL);
+CREATE INDEX cheers_course ON cheers(course_id, occasion);
+CREATE TABLE motivation_rounds(course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  part TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY(course_id, part)) WITHOUT ROWID;
+DELETE FROM settings WHERE key LIKE 'cheers_round:%';
+PRAGMA user_version = 7;
+";
+
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
@@ -164,6 +187,9 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     if version < 6 {
         conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V6} COMMIT; PRAGMA foreign_keys = ON;"))?;
     }
+    if version < 7 {
+        conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V7} COMMIT; PRAGMA foreign_keys = ON;"))?;
+    }
     Ok(conn)
 }
 
@@ -192,10 +218,11 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Resul
 /// Nächste Hintergrund-Aufgabe:
 /// 1. Prüfungsthemen einer Einheit, die auf Fragen wartet (kurz, damit die Fragen den Schwerpunkt kennen)
 /// 2. gewünschte Fragen
+/// 2b. Titel und Erfolgsnamen eines Kurses (ein kurzer Aufruf, gleich nach dem Anlegen)
 /// 3. noch nicht analysierte Abschnitte
 /// 4. Prüfungsthemen der übrigen Einheiten
 /// 5. Fragen geänderter Abschnitte prüfen (PDF ersetzt)
-/// 6. Motivationstexte schreiben (nur wenn sonst nichts ansteht)
+/// 6. Motivationstexte eines Kurses schreiben (nur wenn sonst nichts ansteht)
 pub enum Task {
     Questions { unit_id: i64, level: i64, text: String, topics: Vec<String> },
     /// `filter` = Organisatorisches aussortieren (aus, wenn der Nutzer „Doch einbeziehen“ gewählt hat)
@@ -203,7 +230,8 @@ pub enum Task {
     /// `info` = Titel, Zusammenfassung, Begriffe und Anfang des Lerntexts
     Focus { unit_id: i64, topics: Vec<String>, info: String },
     Recheck { unit_id: i64, text: String },
-    Cheers { occasion: &'static str },
+    /// `part` = „names“ (Titel und Erfolge) oder ein Anlass für Motivationstexte
+    Motivation { course_id: i64, part: &'static str },
 }
 
 fn json_list(s: Option<String>) -> Vec<String> {
@@ -249,6 +277,9 @@ pub fn next_task(conn: &Connection) -> rusqlite::Result<Option<Task>> {
     if q.is_some() {
         return Ok(q);
     }
+    if let Some(course_id) = crate::motivation::wanted_names(conn) {
+        return Ok(Some(Task::Motivation { course_id, part: crate::motivation::NAMES }));
+    }
     let a = conn
         .query_row(
             "SELECT u.id, u.course_id, u.idx, u.page_from, u.page_to, u.source_text, c.name, u.orga IS NOT NULL
@@ -283,5 +314,40 @@ pub fn next_task(conn: &Connection) -> rusqlite::Result<Option<Task>> {
     if r.is_some() {
         return Ok(r);
     }
-    Ok(crate::motivation::wanted(conn).map(|occasion| Task::Cheers { occasion }))
+    Ok(crate::motivation::wanted_cheers(conn).map(|(course_id, part)| Task::Motivation { course_id, part }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v7_backfills_lesson_course() {
+        let dir = std::env::temp_dir().join(format!("lernpfad-test-v7-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lernen.db");
+        {
+            // Datenbank auf Version 6 mit einer Lektion einer Einheit und einem alten Motivationstext
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            for v in [V1, V2, V3, V4, V5, V6] {
+                conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {v} COMMIT; PRAGMA foreign_keys = ON;")).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO courses(id, name, created_at) VALUES(5, 'Marketing', 0);
+                 INSERT INTO documents(id, course_id, name, pages, created_at) VALUES(1, 5, 'a.pdf', 1, 0);
+                 INSERT INTO units(id, course_id, document_id, idx, page_from, page_to, title, source_text) VALUES(1, 5, 1, 0, 1, 1, 'T', 'x');
+                 INSERT INTO lessons(unit_id, xp, correct, total, finished_at) VALUES(1, 20, 5, 6, 100), (NULL, 10, 1, 1, 200);
+                 INSERT INTO badges(user_id, id, at) VALUES(1, 'first', 1), (1, 'week', 1);
+                 INSERT INTO cheers(occasion, text) VALUES('done', 'Gut gemacht!');",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let courses: Vec<Option<i64>> = conn.prepare("SELECT course_id FROM lessons ORDER BY id").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        let badges: Vec<String> = conn.prepare("SELECT id FROM badges").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!((v, courses, badges), (7, vec![Some(5), None], vec!["week".to_string()]));
+    }
 }
