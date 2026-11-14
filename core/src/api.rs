@@ -207,6 +207,22 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
             let (question_id, given, retry) = args!(v, { question_id: i64, given: String, retry: bool });
             ok(answer(c, who, question_id, &given, retry)?)
         }
+        "battle_lobby" => ok(battle_lobby(c, who)?),
+        "battle_create" => ok(battle_create(c, who, args!(v, { course_id: i64 }))?),
+        "battle_join" => {
+            let (battle_id, course_id) = args!(v, { battle_id: i64, course_id: i64 });
+            ok(battle_join(c, who, battle_id, course_id)?)
+        }
+        "battle" => {
+            let (battle_id, exercises) = args!(v, { battle_id: i64, exercises: Option<bool> });
+            ok(battle_state(c, who, battle_id, exercises.unwrap_or(false))?)
+        }
+        "battle_answer" => {
+            let (battle_id, idx, given) = args!(v, { battle_id: i64, idx: usize, given: String });
+            ok(battle_answer(c, who, battle_id, idx, &given)?)
+        }
+        "battle_leave" => ok(battle_leave(c, who, args!(v, { battle_id: i64 }))?),
+        "leaderboard" => ok(leaderboard(c, who, args!(v, { course_id: Option<i64> }))?),
         "stats" => ok(stats_of(&c.db.lock().unwrap(), who)?),
         "finish_lesson" => {
             let (unit_id, correct, total) = args!(v, { unit_id: Option<i64>, correct: i64, total: i64 });
@@ -1052,7 +1068,22 @@ fn grade(kind: &str, prompt: &str, options: &str, expected: &str, groups: &str, 
 /// Prüft ohne KI. `retry` = Wiederholung innerhalb derselben Lektion → Box bleibt unverändert.
 fn answer(c: &Core, who: &Who, question_id: i64, given: &str, retry: bool) -> R<AnswerOut> {
     let conn = c.db.lock().unwrap();
-    question_role(&conn, who, question_id)?;
+    let (out, boxed) = graded(&conn, who, question_id, given)?;
+    if !retry {
+        let b = learn::next_box(boxed, out.correct);
+        conn.execute(
+            "INSERT INTO progress(user_id, question_id, box, due_at, wrong) VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(user_id, question_id) DO UPDATE SET box = excluded.box, due_at = excluded.due_at, wrong = excluded.wrong",
+            params![who.id, question_id, b, learn::due_at(b, db::now()), !out.correct],
+        )
+        .map_err(err)?;
+    }
+    Ok(out)
+}
+
+/// Antwort prüfen (mit Rechteprüfung), ohne etwas zu speichern. Dazu die aktuelle Box des Nutzers.
+fn graded(conn: &Connection, who: &Who, question_id: i64, given: &str) -> R<(AnswerOut, i64)> {
+    question_role(conn, who, question_id)?;
     let (kind, prompt, options, expected, why, groups, spots, boxed): (String, String, String, String, String, String, String, i64) = conn
         .query_row(
             "SELECT q.kind, q.prompt, q.options, q.answer, q.why, q.groups, q.spots, COALESCE(p.box, 0) FROM questions q
@@ -1062,16 +1093,7 @@ fn answer(c: &Core, who: &Who, question_id: i64, given: &str, retry: bool) -> R<
         )
         .map_err(err)?;
     let (correct, solution) = grade(&kind, &prompt, &options, &expected, &groups, &spots, given);
-    if !retry {
-        let b = learn::next_box(boxed, correct);
-        conn.execute(
-            "INSERT INTO progress(user_id, question_id, box, due_at, wrong) VALUES(?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(user_id, question_id) DO UPDATE SET box = excluded.box, due_at = excluded.due_at, wrong = excluded.wrong",
-            params![who.id, question_id, b, learn::due_at(b, db::now()), !correct],
-        )
-        .map_err(err)?;
-    }
-    Ok(AnswerOut { correct, expected, why, solution })
+    Ok((AnswerOut { correct, expected, why, solution }, boxed))
 }
 
 #[derive(Serialize)]
@@ -1328,6 +1350,369 @@ fn create_question(c: &Core, who: &Who, unit_id: i64, kind: String, i: QuestionI
     let level: i64 = conn.query_row("SELECT MAX(q_level, 1) FROM units WHERE id = ?1", [unit_id], |r| r.get(0)).map_err(err)?;
     let id = import::insert_question(&conn, unit_id, &q, level, figure).map_err(err)?;
     questions_where(&conn, who, "q.id = ?1", id)?.pop().ok_or_else(|| DENIED.into())
+}
+
+// ---------- Battle: zwei Konten treten live gegeneinander an ----------
+
+const BATTLE_ROUNDS: usize = 8;
+const BATTLE_MIN: usize = 3;
+const COUNTDOWN_MS: i64 = 3000;
+/// Danach ist ein Battle vorbei, auch wenn jemand nicht fertig wurde (Tab zu, Verbindung weg).
+const BATTLE_MS: i64 = 15 * 60 * 1000;
+/// Offene Herausforderungen verfallen nach 30 Minuten.
+const OPEN_SECS: i64 = 30 * 60;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// Was die Bearbeitungszeit bestimmt: Art und Anzahl der Teile, so wie die Aufgabe auf dem Bildschirm steht.
+/// Gleicher Schlüssel = gleich viel zu tun (z. B. Matrix mit 2 Feldern und 6 Aussagen).
+fn battle_key(e: &Exercise) -> String {
+    format!("{}:{}:{}:{}:{}", e.kind, e.options.len(), e.groups.len(), e.spots.len(), e.prompt.matches("___").count())
+}
+
+/// Paart zwei gemischte Listen (ID, Schlüssel): an jeder Stelle steht bei beiden derselbe Schlüssel.
+fn pair_up(a: &[(i64, String)], b: &[(i64, String)], n: usize) -> Vec<(i64, i64)> {
+    let mut free: HashMap<&str, Vec<i64>> = HashMap::new();
+    for (id, k) in b {
+        free.entry(k.as_str()).or_default().push(*id);
+    }
+    a.iter().filter_map(|(id, k)| Some((*id, free.get_mut(k.as_str())?.pop()?))).take(n).collect()
+}
+
+/// Fragen eines Kurses für das Battle, gemischt, ohne die von `u1` oder `u2` ausgeblendeten.
+fn battle_pool(conn: &Connection, course_id: i64, u1: i64, u2: i64) -> R<Vec<(i64, String)>> {
+    let mut rng = learn::Shuffler::new();
+    let picked = query_questions(
+        conn,
+        "SELECT q.id, q.kind, q.prompt, q.options, q.groups, q.spots, NULL FROM questions q JOIN units u ON u.id = q.unit_id
+         WHERE u.course_id = ?1 AND NOT EXISTS(SELECT 1 FROM progress p WHERE p.question_id = q.id AND p.hidden = 1 AND p.user_id IN (?2, ?3))
+         ORDER BY RANDOM()",
+        params![course_id, u1, u2],
+    )?;
+    Ok(picked.into_iter().map(|p| (p.id, battle_key(&to_exercise(p, &mut rng)))).collect())
+}
+
+struct Battle {
+    a: i64,
+    b: Option<i64>,
+    a_course: i64,
+    b_course: Option<i64>,
+    a_qs: Vec<i64>,
+    b_qs: Vec<i64>,
+    created_at: i64,
+    started_ms: Option<i64>,
+    gave_up: Option<i64>,
+}
+
+fn battle_row(conn: &Connection, id: i64) -> R<Battle> {
+    conn.query_row("SELECT a_id, b_id, a_course, b_course, a_qs, b_qs, created_at, started_ms, gave_up FROM battles WHERE id = ?1", [id], |r| {
+        let (a_qs, b_qs): (String, String) = (r.get(4)?, r.get(5)?);
+        Ok(Battle {
+            a: r.get(0)?,
+            b: r.get(1)?,
+            a_course: r.get(2)?,
+            b_course: r.get(3)?,
+            a_qs: serde_json::from_str(&a_qs).unwrap_or_default(),
+            b_qs: serde_json::from_str(&b_qs).unwrap_or_default(),
+            created_at: r.get(6)?,
+            started_ms: r.get(7)?,
+            gave_up: r.get(8)?,
+        })
+    })
+    .optional()
+    .map_err(err)?
+    .ok_or_else(|| DENIED.into())
+}
+
+#[derive(Serialize, Clone, Copy, Default, PartialEq, Debug)]
+struct Score {
+    answered: usize,
+    correct: usize,
+    /// Zeit der letzten Antwort seit dem Start
+    ms: i64,
+}
+
+fn score(conn: &Connection, battle_id: i64, user: i64) -> R<Score> {
+    conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(correct), 0), COALESCE(MAX(ms), 0) FROM battle_answers WHERE battle_id = ?1 AND user_id = ?2",
+        params![battle_id, user],
+        |r| Ok(Score { answered: r.get::<_, i64>(0)? as usize, correct: r.get::<_, i64>(1)? as usize, ms: r.get(2)? }),
+    )
+    .map_err(err)
+}
+
+impl Battle {
+    fn rounds(&self) -> usize {
+        self.a_qs.len()
+    }
+    fn over(&self, a: Score, b: Score, now: i64) -> bool {
+        self.started_ms.is_some_and(|t| self.gave_up.is_some() || (a.answered == self.rounds() && b.answered == self.rounds()) || now >= t + BATTLE_MS)
+    }
+    /// Aus Sicht von A: Greater = A gewinnt. Aufgeben verliert immer; sonst mehr Richtige,
+    /// bei Gleichstand die kürzere Gesamtzeit. Wer nicht fertig wurde, ist bei Gleichstand der Langsamere.
+    fn outcome(&self, a: Score, b: Score) -> std::cmp::Ordering {
+        use std::cmp::Ordering::*;
+        match self.gave_up {
+            Some(u) if u == self.a => return Less,
+            Some(_) => return Greater,
+            None => {}
+        }
+        let time = |s: Score| if s.answered == self.rounds() { s.ms } else { i64::MAX };
+        a.correct.cmp(&b.correct).then(time(b).cmp(&time(a)))
+    }
+}
+
+#[derive(Serialize)]
+struct Side {
+    name: String,
+    /// Nur, wenn ich den Kurs auch sehen darf
+    course: Option<String>,
+    #[serde(flatten)]
+    score: Score,
+    gave_up: bool,
+}
+
+#[derive(Serialize)]
+struct BattleOut {
+    /// waiting | countdown | running | done
+    state: &'static str,
+    starts_in: i64,
+    rounds: usize,
+    me: Side,
+    them: Option<Side>,
+    /// 1 gewonnen, 0 unentschieden, -1 verloren (nur wenn vorbei)
+    result: Option<i8>,
+    /// Meine Aufgaben, erst ab dem Start (sonst ließe sich im Countdown vorlesen)
+    exercises: Vec<Exercise>,
+}
+
+fn side(conn: &Connection, who: &Who, bt: &Battle, user: i64, course: i64, s: Score) -> R<Side> {
+    let name: String = conn.query_row("SELECT name FROM users WHERE id = ?1", [user], |r| r.get(0)).map_err(err)?;
+    let course = if role(conn, who, course).is_ok() { conn.query_row("SELECT name FROM courses WHERE id = ?1", [course], |r| r.get(0)).optional().map_err(err)? } else { None };
+    Ok(Side { name, course, score: s, gave_up: bt.gave_up == Some(user) })
+}
+
+fn battle_create(c: &Core, who: &Who, course_id: i64) -> R<i64> {
+    let conn = c.db.lock().unwrap();
+    role(&conn, who, course_id)?;
+    // Je Konto höchstens eine offene Herausforderung
+    conn.execute("DELETE FROM battles WHERE a_id = ?1 AND b_id IS NULL", [who.id]).map_err(err)?;
+    conn.execute("INSERT INTO battles(a_id, a_course, created_at) VALUES(?1, ?2, ?3)", params![who.id, course_id, db::now()]).map_err(err)?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Annehmen mit eigenem Kurs. Der Code (nicht die KI) wählt die Aufgaben so, dass an jeder Stelle beide dieselbe Art
+/// mit gleich vielen Teilen haben. Gleicher Kurs → genau dieselben Fragen.
+fn battle_join(c: &Core, who: &Who, id: i64, course_id: i64) -> R<()> {
+    let conn = c.db.lock().unwrap();
+    role(&conn, who, course_id)?;
+    let bt = battle_row(&conn, id)?;
+    if bt.a == who.id || bt.b.is_some() || bt.created_at < db::now() - OPEN_SECS {
+        return Err("Dieses Battle ist nicht mehr offen.".into());
+    }
+    let same = course_id == bt.a_course;
+    let a = battle_pool(&conn, bt.a_course, bt.a, if same { who.id } else { bt.a })?;
+    let pairs = if same { a.iter().take(BATTLE_ROUNDS).map(|(q, _)| (*q, *q)).collect() } else { pair_up(&a, &battle_pool(&conn, course_id, who.id, who.id)?, BATTLE_ROUNDS) };
+    if pairs.len() < BATTLE_MIN {
+        return Err(format!(
+            "Eure Kurse haben zu wenige gleichartige Aufgaben ({} von mindestens {BATTLE_MIN}). Wähle einen anderen Kurs oder lern erst weiter, dann entstehen mehr Fragen.",
+            pairs.len()
+        ));
+    }
+    let (a_qs, b_qs): (Vec<i64>, Vec<i64>) = pairs.into_iter().unzip();
+    conn.execute(
+        "UPDATE battles SET b_id = ?2, b_course = ?3, a_qs = ?4, b_qs = ?5, started_ms = ?6 WHERE id = ?1 AND b_id IS NULL",
+        params![id, who.id, course_id, json!(a_qs).to_string(), json!(b_qs).to_string(), now_ms() + COUNTDOWN_MS],
+    )
+    .map_err(err)?;
+    Ok(())
+}
+
+/// Meine Seite: (bin ich A?, meine Fragen). Fremde Battles → kein Zugriff.
+fn my_side<'a>(bt: &'a Battle, who: &Who) -> R<(bool, &'a [i64])> {
+    if bt.a == who.id {
+        Ok((true, &bt.a_qs))
+    } else if bt.b == Some(who.id) {
+        Ok((false, &bt.b_qs))
+    } else {
+        Err(DENIED.into())
+    }
+}
+
+fn battle_state(c: &Core, who: &Who, id: i64, with_exercises: bool) -> R<BattleOut> {
+    let conn = c.db.lock().unwrap();
+    let bt = battle_row(&conn, id)?;
+    let (is_a, qs) = my_side(&bt, who)?;
+    let (sa, sb) = (score(&conn, id, bt.a)?, bt.b.map(|b| score(&conn, id, b)).transpose()?.unwrap_or_default());
+    let now = now_ms();
+    let over = bt.over(sa, sb, now);
+    let state = match bt.started_ms {
+        None => "waiting",
+        _ if over => "done",
+        Some(t) if now < t => "countdown",
+        _ => "running",
+    };
+    let a = side(&conn, who, &bt, bt.a, bt.a_course, sa)?;
+    let b = match (bt.b, bt.b_course) {
+        (Some(u), Some(course)) => Some(side(&conn, who, &bt, u, course, sb)?),
+        _ => None,
+    };
+    let (me, them) = if is_a { (a, b) } else { (b.ok_or(DENIED)?, Some(a)) };
+    let result = over.then(|| {
+        let o = bt.outcome(sa, sb);
+        (if is_a { o } else { o.reverse() }) as i8
+    });
+    let mut exercises = vec![];
+    if with_exercises && state == "running" {
+        let mut rng = learn::Shuffler::new();
+        for q in qs {
+            let p = query_questions(&conn, "SELECT q.id, q.kind, q.prompt, q.options, q.groups, q.spots, f.image FROM questions q LEFT JOIN figures f ON f.id = q.figure_id WHERE q.id = ?1", [q])?;
+            // shortcut: mitten im Battle gelöschte Frage → hier ist Schluss, das Battle endet per Zeitlimit; Platzhalter-Aufgabe, falls das vorkommt.
+            let Some(p) = p.into_iter().next() else { break };
+            exercises.push(to_exercise(p, &mut rng));
+        }
+    }
+    Ok(BattleOut { state, starts_in: bt.started_ms.map_or(0, |t| (t - now).max(0)), rounds: bt.rounds(), me, them, result, exercises })
+}
+
+/// Antworten nur der Reihe nach, nur während das Battle läuft. Die Zeit misst der Server.
+fn battle_answer(c: &Core, who: &Who, id: i64, idx: usize, given: &str) -> R<AnswerOut> {
+    let conn = c.db.lock().unwrap();
+    let bt = battle_row(&conn, id)?;
+    let (_, qs) = my_side(&bt, who)?;
+    let (sa, sb) = (score(&conn, id, bt.a)?, bt.b.map(|b| score(&conn, id, b)).transpose()?.unwrap_or_default());
+    let now = now_ms();
+    if bt.started_ms.is_none_or(|t| now < t) {
+        return Err("Das Battle hat noch nicht begonnen.".into());
+    }
+    if bt.over(sa, sb, now) {
+        return Err("Das Battle ist schon vorbei.".into());
+    }
+    let mine = if bt.a == who.id { sa } else { sb };
+    let question_id = *qs.get(idx).ok_or(DENIED)?;
+    if idx != mine.answered {
+        return Err("Diese Aufgabe ist schon beantwortet.".into());
+    }
+    let (out, _) = graded(&conn, who, question_id, given)?;
+    conn.execute(
+        "INSERT INTO battle_answers(battle_id, user_id, idx, correct, ms) VALUES(?1, ?2, ?3, ?4, ?5)",
+        params![id, who.id, idx as i64, out.correct, now - bt.started_ms.unwrap_or(now)],
+    )
+    .map_err(err)?;
+    Ok(out)
+}
+
+/// Warten → Herausforderung zurückziehen. Läuft es schon → aufgeben (zählt als verloren).
+fn battle_leave(c: &Core, who: &Who, id: i64) -> R<()> {
+    let conn = c.db.lock().unwrap();
+    let bt = battle_row(&conn, id)?;
+    my_side(&bt, who)?;
+    if bt.b.is_none() {
+        conn.execute("DELETE FROM battles WHERE id = ?1", [id]).map_err(err)?;
+    } else {
+        conn.execute("UPDATE battles SET gave_up = ?2 WHERE id = ?1 AND gave_up IS NULL", params![id, who.id]).map_err(err)?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct OpenBattle {
+    id: i64,
+    name: String,
+    /// Nur, wenn ich den Kurs auch sehen darf
+    course: Option<String>,
+}
+
+/// Offene Herausforderungen der anderen und mein noch nicht beendetes Battle (zum Zurückkehren).
+fn battle_lobby(c: &Core, who: &Who) -> R<Value> {
+    let conn = c.db.lock().unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT b.id, u.name, b.a_course, c.name FROM battles b JOIN users u ON u.id = b.a_id JOIN courses c ON c.id = b.a_course
+             WHERE b.b_id IS NULL AND b.a_id != ?1 AND b.created_at > ?2 AND u.disabled = 0 ORDER BY b.id DESC LIMIT 50",
+        )
+        .map_err(err)?;
+    let rows: Vec<(i64, String, i64, String)> =
+        stmt.query_map(params![who.id, db::now() - OPEN_SECS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(err)?.collect::<Result<_, _>>().map_err(err)?;
+    let open: Vec<OpenBattle> = rows.into_iter().map(|(id, name, course, cname)| OpenBattle { id, name, course: role(&conn, who, course).is_ok().then_some(cname) }).collect();
+    let active: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM battles WHERE (a_id = ?1 OR b_id = ?1) AND gave_up IS NULL
+               AND ((b_id IS NULL AND created_at > ?2) OR started_ms > ?3) ORDER BY id DESC LIMIT 1",
+            params![who.id, db::now() - OPEN_SECS, now_ms() - BATTLE_MS],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(err)?;
+    // Beide fertig → nicht mehr „laufend“
+    let active = match active {
+        Some(id) if !battle_over(&conn, id)? => Some(id),
+        _ => None,
+    };
+    Ok(json!({ "open": open, "active": active }))
+}
+
+fn battle_over(conn: &Connection, id: i64) -> R<bool> {
+    let bt = battle_row(conn, id)?;
+    let (sa, sb) = (score(conn, id, bt.a)?, bt.b.map(|b| score(conn, id, b)).transpose()?.unwrap_or_default());
+    Ok(bt.over(sa, sb, now_ms()))
+}
+
+#[derive(Serialize, Default)]
+struct Rank {
+    name: String,
+    me: bool,
+    battles: i64,
+    wins: i64,
+    correct: i64,
+    total: i64,
+}
+
+/// Bestenliste eines Kurses (alle beendeten Battles, in denen jemand mit diesem Kurs angetreten ist)
+/// oder ohne Kurs die des ganzen Servers (nur Namen und Zahlen, darum für alle Konten). Reihenfolge: Siege, dann Trefferquote.
+fn leaderboard(c: &Core, who: &Who, course_id: Option<i64>) -> R<Vec<Rank>> {
+    let conn = c.db.lock().unwrap();
+    if let Some(id) = course_id {
+        role(&conn, who, id)?;
+    }
+    let ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id FROM battles WHERE (?1 IS NULL OR a_course = ?1 OR b_course = ?1) AND b_id IS NOT NULL").map_err(err)?;
+        let ids = stmt.query_map([course_id], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?;
+        ids
+    };
+    let now = now_ms();
+    let mut by_user: HashMap<i64, Rank> = HashMap::new();
+    for id in ids {
+        let bt = battle_row(&conn, id)?;
+        let Some(b) = bt.b else { continue };
+        let (sa, sb) = (score(&conn, id, bt.a)?, score(&conn, id, b)?);
+        if !bt.over(sa, sb, now) {
+            continue;
+        }
+        let o = bt.outcome(sa, sb);
+        for (user, course, s, won) in [(bt.a, bt.a_course, sa, o.is_gt()), (b, bt.b_course.unwrap_or(0), sb, o.is_lt())] {
+            if course_id.is_some_and(|id| id != course) {
+                continue;
+            }
+            let r = by_user.entry(user).or_default();
+            r.battles += 1;
+            r.wins += won as i64;
+            r.correct += s.correct as i64;
+            r.total += bt.rounds() as i64;
+        }
+    }
+    let mut out: Vec<Rank> = by_user
+        .into_iter()
+        .map(|(user, mut r)| {
+            r.name = conn.query_row("SELECT name FROM users WHERE id = ?1", [user], |x| x.get(0)).unwrap_or_default();
+            r.me = user == who.id;
+            r
+        })
+        .collect();
+    out.sort_by(|x, y| y.wins.cmp(&x.wins).then((y.correct * x.total.max(1)).cmp(&(x.correct * y.total.max(1)))).then(x.name.cmp(&y.name)));
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1793,5 +2178,78 @@ mod tests {
         assert!(!sees(&U2));
         run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Mikro", "share": "some", "members": [2] })).unwrap();
         assert!(sees(&U2));
+    }
+
+    #[test]
+    fn pair_up_matches_kind_and_size() {
+        let k = |s: &str| s.to_string();
+        let a = [(1, k("mc:4")), (2, k("sort:6:2")), (3, k("true_false:2")), (4, k("mc:4"))];
+        let b = [(9, k("true_false:2")), (8, k("mc:4")), (7, k("sort:5:2"))];
+        // sort mit 6 statt 5 Aussagen ist mehr Arbeit → bleibt draußen; zweite mc findet keinen Partner mehr
+        assert_eq!(pair_up(&a, &b, 8), vec![(1, 8), (3, 9)]);
+    }
+
+    #[test]
+    fn battle_flow() {
+        let dir = tmp("battle");
+        let c = core(&dir);
+        let (course, ..) = seed(&c);
+        c.db.lock().unwrap().execute_batch(
+            "INSERT INTO questions(id, unit_id, kind, prompt, options, answer) VALUES
+               (42, 30, 'mc', 'Was verschiebt die Kurve?', '[\"Einkommen\",\"Preis\",\"Menge\",\"Zeit\"]', 'Einkommen');
+             INSERT INTO courses(id, name, created_at, owner_id) VALUES(11, 'Makro', 0, 2);
+             INSERT INTO documents(id, course_id, name, pages, created_at) VALUES(21, 11, 'm.pdf', 1, 0);
+             INSERT INTO units(id, course_id, document_id, idx, page_from, page_to, title, source_text, status, q_state)
+               VALUES(31, 11, 21, 0, 1, 1, 'BIP', 'Text', 'ready', 2);
+             INSERT INTO questions(id, unit_id, kind, prompt, options, answer) VALUES
+               (50, 31, 'mc', 'BIP misst?', '[\"Wertschöpfung\",\"Preise\",\"Zinsen\",\"Löhne\"]', 'Wertschöpfung'),
+               (51, 31, 'true_false', 'Inflation senkt die Kaufkraft.', '[\"Richtig\",\"Falsch\"]', 'Richtig'),
+               (52, 31, 'mc', 'Wer macht Geldpolitik?', '[\"EZB\",\"Bund\",\"Länder\",\"IWF\"]', 'EZB'),
+               (53, 31, 'order', 'Ordne', '[\"a\",\"b\",\"c\"]', '');",
+        )
+        .unwrap();
+        let me = crate::LOCAL;
+        let id = run(&c, &U2, "battle_create", json!({ "courseId": 11 })).unwrap();
+        // Lobby: fremder Kurs ohne Namen; U3 darf mit einem Kurs, den er nicht sieht, nicht annehmen
+        let lobby = run(&c, &me, "battle_lobby", json!({})).unwrap();
+        assert_eq!(lobby["open"][0]["name"], "Kommilitone");
+        assert!(lobby["open"][0]["course"].is_null());
+        assert_eq!(run(&c, &U3, "battle_join", json!({ "battleId": id, "courseId": course })).unwrap_err(), DENIED);
+        run(&c, &me, "battle_join", json!({ "battleId": id, "courseId": course })).unwrap();
+        assert!(run(&c, &U3, "battle_join", json!({ "battleId": id, "courseId": course })).is_err(), "schon vergeben");
+        assert_eq!(run(&c, &U3, "battle", json!({ "battleId": id })).unwrap_err(), DENIED);
+        let st = run(&c, &me, "battle", json!({ "battleId": id, "exercises": true })).unwrap();
+        assert_eq!((st["state"].as_str(), st["exercises"].as_array().unwrap().len()), (Some("countdown"), 0), "Aufgaben erst nach dem Countdown");
+        assert!(run(&c, &me, "battle_answer", json!({ "battleId": id, "idx": 0, "given": "x" })).is_err());
+
+        c.db.lock().unwrap().execute("UPDATE battles SET started_ms = ?1", [now_ms() - 1000]).unwrap();
+        let ex = |who: &Who| run(&c, who, "battle", json!({ "battleId": id, "exercises": true })).unwrap()["exercises"].as_array().unwrap().clone();
+        let (mine, theirs) = (ex(&me), ex(&U2));
+        assert_eq!(mine.len(), 3, "tf + 2 mc passen, die Reihenfolge-Aufgabe hat keinen Partner");
+        for (x, y) in mine.iter().zip(&theirs) {
+            assert_eq!((&x["kind"], x["options"].as_array().unwrap().len()), (&y["kind"], y["options"].as_array().unwrap().len()), "an jeder Stelle dieselbe Art");
+        }
+        assert_eq!(run(&c, &me, "battle_answer", json!({ "battleId": id, "idx": 1, "given": "x" })).unwrap_err(), "Diese Aufgabe ist schon beantwortet.", "nur der Reihe nach");
+        for i in 0..3 {
+            run(&c, &me, "battle_answer", json!({ "battleId": id, "idx": i, "given": "falsch" })).unwrap();
+            let q = theirs[i]["id"].as_i64().unwrap();
+            let right: String = c.db.lock().unwrap().query_row("SELECT answer FROM questions WHERE id = ?1", [q], |r| r.get(0)).unwrap();
+            assert!(run(&c, &U2, "battle_answer", json!({ "battleId": id, "idx": i, "given": right })).unwrap()["correct"].as_bool().unwrap());
+        }
+        let (a, b) = (run(&c, &me, "battle", json!({ "battleId": id })).unwrap(), run(&c, &U2, "battle", json!({ "battleId": id })).unwrap());
+        assert_eq!((a["state"].as_str(), a["result"].as_i64(), b["result"].as_i64()), (Some("done"), Some(-1), Some(1)));
+        assert_eq!(b["me"]["correct"], 3);
+        assert!(run(&c, &me, "battle_lobby", json!({})).unwrap()["active"].is_null(), "beendet ist nicht mehr laufend");
+
+        let board = run(&c, &U2, "leaderboard", json!({ "courseId": 11 })).unwrap();
+        assert_eq!((board[0]["name"].as_str(), board[0]["wins"].as_i64(), board.as_array().unwrap().len()), (Some("Kommilitone"), Some(1), 1));
+        assert_eq!(run(&c, &me, "leaderboard", json!({ "courseId": course })).unwrap()[0]["wins"], 0);
+        assert_eq!(run(&c, &U3, "leaderboard", json!({ "courseId": course })).unwrap_err(), DENIED);
+        // Ganzer Server: beide Seiten zählen, auch für Konten ohne Zugriff auf die Kurse
+        let all = run(&c, &U3, "leaderboard", json!({})).unwrap();
+        assert_eq!((all[0]["name"].as_str(), all[0]["wins"].as_i64(), all[1]["name"].as_str(), all.as_array().unwrap().len()), (Some("Kommilitone"), Some(1), Some("Ich"), 2));
+        // Fortschritt (Leitner-Boxen) bleibt vom Battle unberührt
+        let n: i64 = c.db.lock().unwrap().query_row("SELECT COUNT(*) FROM progress", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
     }
 }

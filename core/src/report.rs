@@ -42,6 +42,12 @@ pub const NORMAL: &[&str] = &[
     "nicht selbst sperren",
     "server faehrt herunter",
     "einziger admin",
+    // Battle
+    "gleichartige aufgaben",
+    "battle ist nicht mehr offen",
+    "battle hat noch nicht begonnen",
+    "battle ist schon vorbei",
+    "schon beantwortet",
 ];
 
 /// Teile von Meldungen, die sicher auf einen Programmfehler zeigen.

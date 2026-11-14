@@ -6,15 +6,17 @@ import * as review from "./review.js";
 import * as add from "./import.js";
 import * as profile from "./profile.js";
 import * as unit from "./unit.js";
+import * as battle from "./battle.js";
 import { openLesson } from "./lesson.js";
 import * as auth from "./auth.js";
 import { appInfo, bootReport } from "./report.js";
 import { syncReminder } from "./remind.js";
 
-const views = { learn: path, review, add, profile, unit };
+const views = { learn: path, review, add, profile, unit, battle };
 const TABS = [
   ["learn", "path", "Lernen"],
   ["review", "cards", "Wiederholen"],
+  ["battle", "crown-fill", "Battle"], // nur mit eigenem Server: braucht andere Konten
   ["add", "plus-circle", "Hinzufügen"],
   ["profile", "user-circle", "Profil"],
 ];
@@ -56,7 +58,7 @@ async function boot() {
     "nav.tabbar",
     { "aria-label": "Hauptnavigation" },
     h("div.brand", icon("path"), "Lernpfad"),
-    TABS.map(([name, ic, label]) => h("a.tab", { href: `#/${name}`, "data-tab": name }, icon(ic), h("span", label))),
+    TABS.filter(([name]) => name !== "battle" || state.session.mode === "server").map(([name, ic, label]) => h("a.tab", { href: `#/${name}`, "data-tab": name }, icon(ic), h("span", label))),
   );
   document.getElementById("app").replaceChildren(topbar, main, tabs);
   renderTopbar();
@@ -133,13 +135,14 @@ function parse() {
 async function route() {
   const { name, arg } = parse();
   if (name === "lesson") {
-    // #/lesson/<Einheit>, #/lesson/review (fällige), #/lesson/wrong-<Kurs> (falsche) oder #/lesson/exam-<Kurs> (Prüfungstraining)
+    // #/lesson/<Einheit>, #/lesson/review (fällige), #/lesson/wrong-<Kurs> (falsche), #/lesson/exam-<Kurs> (Prüfungstraining) oder #/lesson/battle-<Battle>
     const wrongCourse = arg?.startsWith("wrong-") ? Number(arg.slice(6)) : null;
     const examCourse = arg?.startsWith("exam-") ? Number(arg.slice(5)) : null;
-    const base = arg === "review" || wrongCourse || examCourse ? "review" : "learn";
+    const battleId = arg?.startsWith("battle-") ? Number(arg.slice(7)) : null;
+    const base = battleId ? "battle" : arg === "review" || wrongCourse || examCourse ? "review" : "learn";
     if (mounted.name !== base) await show(base);
     lesson?.close();
-    lesson = openLesson({ unitId: base === "review" ? null : Number(arg), wrongCourse, examCourse }, () => {
+    lesson = openLesson({ unitId: base === "learn" ? Number(arg) : null, wrongCourse, examCourse, battleId }, () => {
       lesson = null;
       location.replace(`#/${base}`);
     });

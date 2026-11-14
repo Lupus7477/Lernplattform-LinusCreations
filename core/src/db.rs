@@ -106,6 +106,21 @@ CREATE TABLE course_left(course_id INTEGER NOT NULL REFERENCES courses(id) ON DE
 PRAGMA user_version = 4;
 ";
 
+/// Version 5: Live-Battles zwischen zwei Konten. `a_qs`/`b_qs` = Fragen-IDs je Seite, an jeder Stelle dieselbe Aufgabenart.
+/// `started_ms` = Start nach dem Countdown (ms), `gave_up` = wer aufgegeben hat. `ms` je Antwort = Zeit seit dem Start.
+const V5: &str = "
+CREATE TABLE battles(id INTEGER PRIMARY KEY,
+  a_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, a_course INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  b_id INTEGER REFERENCES users(id) ON DELETE CASCADE, b_course INTEGER REFERENCES courses(id) ON DELETE CASCADE,
+  a_qs TEXT NOT NULL DEFAULT '[]', b_qs TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, started_ms INTEGER, gave_up INTEGER);
+CREATE TABLE battle_answers(battle_id INTEGER NOT NULL REFERENCES battles(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL, idx INTEGER NOT NULL, correct INTEGER NOT NULL, ms INTEGER NOT NULL,
+  PRIMARY KEY(battle_id, user_id, idx)) WITHOUT ROWID;
+CREATE INDEX battles_a_course ON battles(a_course);
+CREATE INDEX battles_b_course ON battles(b_course);
+PRAGMA user_version = 5;
+";
+
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
@@ -128,6 +143,9 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     }
     if version < 4 {
         conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V4} COMMIT; PRAGMA foreign_keys = ON;"))?;
+    }
+    if version < 5 {
+        conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V5} COMMIT; PRAGMA foreign_keys = ON;"))?;
     }
     Ok(conn)
 }

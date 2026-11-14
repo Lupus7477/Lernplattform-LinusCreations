@@ -256,6 +256,7 @@ Wird Kaffee teurer, trinken manche lieber Tee. Die nachgefragte Menge Kaffee sin
 
 > **Merke:** Preis hoch, nachgefragte Menge runter.`;
 
+let mockBattle = null;
 const handlers = {
   ai_status: () => ({ ...ai }),
   ai_tiers: () => TIERS,
@@ -401,6 +402,35 @@ const handlers = {
     }
     return { correct, expected: x.answer, why: x.why, solution };
   },
+  // Battle: „Mia“ nimmt nach 2 s an und beantwortet alle 4 s eine Aufgabe (jede zweite richtig).
+  battle_lobby: () => ({ open: [{ id: 99, name: "Jonas", course: null }], active: null }),
+  battle_create: () => ((mockBattle = { t0: Date.now(), ex: shuffle(visible()).slice(0, 6), mine: [], gaveUp: false }), 1),
+  battle_join: () => ((mockBattle = { t0: Date.now() - 2000, ex: shuffle(visible()).slice(0, 6), mine: [], gaveUp: false }), 1),
+  battle: ({ exercises }) => {
+    const b = mockBattle;
+    const start = b.t0 + 5000; // 2 s warten + 3 s Countdown
+    const t = Date.now();
+    const rounds = b.ex.length;
+    const theirN = Math.max(0, Math.min(rounds, Math.floor((t - start) / 4000)));
+    const them = { name: "Mia", course: null, answered: theirN, correct: Math.ceil(theirN / 2), ms: theirN * 4000, gave_up: false };
+    const me = { name: "Ich", course: db.courses[0]?.name, answered: b.mine.length, correct: b.mine.filter((m) => m.ok).length, ms: b.mine.at(-1)?.ms ?? 0, gave_up: b.gaveUp };
+    const done = b.gaveUp || (me.answered === rounds && theirN === rounds);
+    const state = t < b.t0 + 2000 ? "waiting" : done ? "done" : t < start ? "countdown" : "running";
+    const time = (s) => (s.answered === rounds ? s.ms : Infinity);
+    const result = !done ? null : b.gaveUp ? -1 : Math.sign(me.correct - them.correct || time(them) - time(me));
+    return { state, starts_in: Math.max(0, start - t), rounds, me, them: state === "waiting" ? null : them, result, exercises: exercises && state === "running" ? b.ex.map(toExercise) : [] };
+  },
+  battle_answer: ({ idx, given }) => {
+    const r = handlers.answer({ questionId: mockBattle.ex[idx].id, given, retry: true });
+    mockBattle.mine.push({ ok: r.correct, ms: Date.now() - mockBattle.t0 - 5000 });
+    return r;
+  },
+  battle_leave: () => (mockBattle.gaveUp = true),
+  leaderboard: () => [
+    { name: "Mia", me: false, battles: 5, wins: 4, correct: 31, total: 40 },
+    { name: "Ich", me: true, battles: 4, wins: 2, correct: 24, total: 32 },
+    { name: "Jonas", me: false, battles: 2, wins: 0, correct: 9, total: 16 },
+  ],
   stats: () => stats(),
   finish_lesson: ({ unitId, correct, total }) => {
     const xp = 2 * correct + 5 + (total > 0 && correct >= total ? 5 : 0);

@@ -30,19 +30,20 @@ function shuffle(a) {
 
 /**
  * Lektion einer Einheit (`unitId`), „Falsche wiederholen“ (`wrongCourse`), Prüfungstraining (`examCourse`) eines Kurses
- * oder die tägliche Wiederholung (alles leer).
+ * oder die tägliche Wiederholung (alles leer). `battleId`: Live-Battle, geprüft und gestoppt vom Server.
  */
-export function openLesson({ unitId = null, wrongCourse = null, examCourse = null }, onExit) {
+export function openLesson({ unitId = null, wrongCourse = null, examCourse = null, battleId = null }, onExit) {
   const fill = h("i");
   const progress = h("div.progress", { role: "progressbar", "aria-label": "Fortschritt der Lektion", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": "0" }, fill);
   const combo = h("span.combo.hide", { "aria-live": "polite" });
+  const rival = h("span.chip.rival", { hidden: true });
   const closeBtn = h("button.icon-btn", { type: "button", "aria-label": "Lektion beenden" }, icon("x"));
   const menuBtn = h("button.icon-btn", { type: "button", "aria-label": "Diese Frage merken, bearbeiten, ausblenden oder melden", hidden: true }, icon("dots-three"));
   const body = h("div.lesson-body", { tabindex: "-1" });
   const mainBtn = h("button.btn", { type: "button", disabled: true }, "Prüfen");
   const foot = h("div.lesson-foot", h("div.inner", mainBtn));
   const fb = h("div.feedback", { "aria-live": "assertive" });
-  const root = h("div.lesson", { role: "dialog", "aria-modal": "true", "aria-label": unitId ? "Lektion" : examCourse ? "Prüfungstraining" : "Wiederholung" }, h("div.lesson-top", closeBtn, progress, combo, menuBtn), body, foot, fb);
+  const root = h("div.lesson", { role: "dialog", "aria-modal": "true", "aria-label": battleId ? "Battle" : unitId ? "Lektion" : examCourse ? "Prüfungstraining" : "Wiederholung" }, h("div.lesson-top", closeBtn, progress, combo, rival, menuBtn), body, foot, fb);
   document.body.append(root);
   document.body.style.overflow = "hidden";
 
@@ -55,6 +56,10 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   let lastOk = false;
   let phase = "loading"; // answer | checking | feedback | done
   let unsub = null;
+  let battle = null; // letzter Stand vom Server
+  let poll = null;
+  let countTimer = null;
+  let resultShown = false;
   const t0 = Date.now();
   const streakBefore = state.stats?.streak ?? 0;
 
@@ -458,7 +463,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     setReady(false);
     mainBtn.textContent = "Prüfen";
     foot.hidden = ex.kind === "match";
-    menuBtn.hidden = !ex.id; // „Zuordnen“ kommt aus den Begriffen, nicht aus einer Frage
+    menuBtn.hidden = !ex.id || !!battleId; // „Zuordnen“ kommt aus den Begriffen, nicht aus einer Frage; im Battle läuft die Zeit
     const view = { mc: () => choice(ex), true_false: () => choice(ex, true), fill_blank: () => blank(ex), cloze: () => blank(ex), sort: () => board(ex), order: () => chain(ex), label: () => figure(ex) }[ex.kind];
     cur.view = view ? view() : match(ex);
     const label = ex.kind === "sort" && ex.groups.length === 4 ? "Fülle die Matrix" : LABEL[ex.kind];
@@ -490,7 +495,8 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     phase = "checking";
     setReady(false);
     try {
-      const res = await call("answer", { questionId: cur.ex.id, given: typeof given === "string" ? given : JSON.stringify(given), retry: !!cur.ex.retry });
+      const text = typeof given === "string" ? given : JSON.stringify(given);
+      const res = battleId ? await call("battle_answer", { battleId, idx: cur.ex.idx, given: text }) : await call("answer", { questionId: cur.ex.id, given: text, retry: !!cur.ex.retry });
       cur.view.mark(res.correct, res.expected, res.solution);
       verdict(res.correct, res.expected, res.why);
     } catch (e) {
@@ -511,14 +517,15 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     } else {
       run = 0;
       if (cur.ex.kind !== "match") sound.wrong();
-      queue.push({ ...cur.ex, retry: true });
+      if (battleId) solved++; // im Battle zählt jede Aufgabe einmal, kein „Nochmal“
+      else queue.push({ ...cur.ex, retry: true });
     }
     updateProgress();
 
     const nextBtn = h(`button.btn.${ok ? "right" : "wrong"}`, { type: "button", onclick: next }, "Weiter");
     const ex = cur.ex;
     const whyBtn =
-      !ok && ex.id
+      !ok && ex.id && !battleId
         ? h("button.btn.secondary", {
             type: "button",
             onclick: () =>
@@ -652,6 +659,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   }
 
   async function finish() {
+    if (battleId) return battleFinish();
     phase = "done";
     menuBtn.hidden = true;
     let res;
@@ -697,6 +705,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
 
   // ---------- Laden & Warten ----------
   async function load() {
+    if (battleId) return battleLoad();
     phase = "loading";
     foot.hidden = true;
     body.replaceChildren(h("div.stack", h("div.skeleton", { style: { width: "40%" } }), h("div.skeleton", { style: { height: "36px" } }), h("div.skeleton", { style: { height: "62px" } }), h("div.skeleton", { style: { height: "62px" } })));
@@ -745,12 +754,127 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     body.replaceChildren(h("div.empty", h("div.art", icon(ic)), h("h1", title), h("p", text), ...actions, h("button.btn.secondary", { type: "button", onclick: exit }, "Zurück")));
   }
 
+  // ---------- Battle ----------
+  // shortcut: Stand per Abfrage alle 1,5 s statt Server-Ereignis; SSE-Ereignis „battle-updated“, falls viele gleichzeitig spielen.
+  async function battleLoad() {
+    phase = "loading";
+    foot.hidden = true;
+    let b;
+    try {
+      b = await call("battle", { battleId, exercises: true });
+    } catch (e) {
+      return message("warning", "Battle nicht gefunden", String(e));
+    }
+    onBattle(b);
+    poll ??= setInterval(battleTick, 1500);
+    if (b.state === "waiting") return message("users", "Warte auf Gegner", "Sobald jemand deine Herausforderung annimmt, geht es los. „Zurück“ zieht sie zurück.");
+    if (b.state === "countdown") return countdown(b.starts_in);
+    if (b.state === "done") return battleResult(b);
+    queue = b.exercises.slice(b.me.answered).map((ex, i) => ({ ...ex, idx: b.me.answered + i }));
+    total = b.rounds;
+    solved = b.me.answered;
+    updateProgress();
+    if (!queue.length) return battleFinish();
+    cur = { ex: queue.shift() };
+    show();
+  }
+
+  async function battleTick() {
+    const was = battle?.state;
+    const b = await call("battle", { battleId }).catch(() => null);
+    if (!b) return;
+    onBattle(b);
+    if (b.state === "done") return resultShown || battleResult(b);
+    if (was === "waiting") battleLoad();
+  }
+
+  /** Gegner oben neben dem eigenen Fortschritt: Ring + Name + wie weit. */
+  function onBattle(b) {
+    battle = b;
+    const t = b.them;
+    rival.hidden = !t;
+    if (!t) return;
+    rival.setAttribute("aria-label", `${t.name}: ${t.answered} von ${b.rounds} Aufgaben`);
+    rival.replaceChildren(h("span.ring", { style: { "--p": String(t.answered / Math.max(1, b.rounds)) } }), h("b", t.name), h("span.num", `${t.answered}/${b.rounds}`));
+  }
+
+  /** 3 · 2 · 1: Die Aufgaben schickt der Server erst danach. */
+  function countdown(ms) {
+    menuBtn.hidden = true;
+    const num = h("b.count-num", { "aria-live": "assertive" });
+    body.replaceChildren(h("div.done-screen", h("p.muted", `Gegen ${battle.them?.name ?? "…"}`), num, h("p.muted", "An jeder Stelle dieselbe Aufgabenart. Mehr Richtige gewinnt, bei Gleichstand die kürzere Zeit.")));
+    const end = Date.now() + ms;
+    const step = () => {
+      const left = Math.ceil((end - Date.now()) / 1000);
+      if (left <= 0) return battleLoad();
+      if (num.textContent !== String(left)) {
+        num.textContent = String(left);
+        num.animate(reduceMotion() ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: "scale(0.9)" }, { opacity: 1, transform: "none" }], { duration: 250, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+      }
+      countTimer = setTimeout(step, 100);
+    };
+    step();
+  }
+
+  function battleFinish() {
+    phase = "done";
+    foot.hidden = true;
+    body.replaceChildren(h("div.empty", h("div.art", icon("hourglass-medium")), h("h1", `Warte auf ${battle?.them?.name ?? "deinen Gegner"}`), h("p", "Du bist durch. Das Ergebnis kommt, sobald ihr beide fertig seid.")));
+    battleTick();
+  }
+
+  function battleResult(b) {
+    resultShown = true;
+    phase = "done";
+    clearInterval(poll);
+    clearTimeout(countTimer);
+    fb.classList.remove("open");
+    root.style.setProperty("--cover", "0px");
+    body.classList.remove("fit");
+    menuBtn.hidden = true;
+    combo.classList.add("hide");
+    const { me, them } = b;
+    const title = b.result > 0 ? "Gewonnen!" : b.result < 0 ? "Verloren" : "Unentschieden";
+    const why = them.gave_up
+      ? `${them.name} hat aufgegeben.`
+      : me.gave_up
+        ? "Du hast aufgegeben."
+        : b.result && me.correct === them.correct
+          ? b.result > 0 ? "Gleich viele richtig, du warst schneller." : `Gleich viele richtig, ${them.name} war schneller.`
+          : null;
+    const time = (s) => (s.answered === b.rounds ? `${Math.floor(s.ms / 60000)}:${String(Math.floor(s.ms / 1000) % 60).padStart(2, "0")}` : "–");
+    const card = (s, name, won) => h(`div${won ? ".won" : ""}`, h("b", `${s.correct}/${b.rounds}`), h("span", name), h("span.num", time(s)));
+    body.replaceChildren(
+      h(
+        "div.done-screen",
+        icon(b.result > 0 ? "crown-fill" : b.result < 0 ? "x-circle-fill" : "users", `flame battle-${b.result > 0 ? "won" : b.result < 0 ? "lost" : "draw"} ignite`),
+        h("h1", title),
+        why ? h("p.muted", why) : null,
+        h("div.tally.duo", card(me, "Du", b.result > 0), card(them, them.name, b.result < 0)),
+        h("p.hint", them.course ? `${them.name} hat mit „${them.course}“ gespielt.` : `${them.name} hat mit einem eigenen Kurs gespielt.`),
+      ),
+    );
+    if (b.result > 0) {
+      sound.done();
+      confetti();
+    }
+    foot.hidden = false;
+    mainBtn.textContent = "Weiter";
+    setReady(true);
+    mainBtn.focus({ preventScroll: true });
+  }
+
   // ---------- Steuerung ----------
   mainBtn.addEventListener("click", () => (phase === "done" ? exit() : check()));
   closeBtn.addEventListener("click", askClose);
   menuBtn.addEventListener("click", questionMenu);
 
   async function askClose() {
+    if (battleId && battle?.state === "running" && phase !== "done") {
+      const quit = await confirmSheet({ title: "Battle aufgeben?", text: "Das zählt als verloren.", confirm: "Aufgeben", cancel: "Weiterspielen", danger: true });
+      if (quit) await call("battle_leave", { battleId }).then(exit, fail);
+      return;
+    }
     if (phase === "done" || phase === "loading" || total === 0) return exit();
     const leave = await confirmSheet({
       title: "Lektion beenden?",
@@ -781,11 +905,14 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
 
   function close() {
     unsub?.();
+    clearInterval(poll);
+    clearTimeout(countTimer);
     document.removeEventListener("keydown", onKey);
     document.body.style.overflow = "";
     root.remove();
   }
   function exit() {
+    if (battleId && battle?.state === "waiting") call("battle_leave", { battleId }).catch(() => {}); // Herausforderung zurückziehen
     close();
     onExit();
   }

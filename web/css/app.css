@@ -250,7 +250,8 @@ main:focus,
   bottom: 0;
   z-index: var(--z-bar);
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr; /* 4 Tabs, mit eigenem Server 5 (Battle) */
   padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   background: var(--card);
   border-top: 2px solid var(--line);
@@ -1738,6 +1739,87 @@ textarea.input {
 }
 .wrong-row b {
   overflow-wrap: anywhere;
+}
+
+/* ---------- Battle ---------- */
+/* Gegner neben dem eigenen Fortschritt */
+.rival {
+  max-width: 40%;
+  font-size: 0.88rem;
+}
+.rival b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rival .ring {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  background: conic-gradient(var(--ember) calc(var(--p) * 1turn), var(--line) 0);
+}
+.rival .ring::after {
+  width: 12px;
+  height: 12px;
+}
+.count-num {
+  font: 800 clamp(5rem, 4rem + 8vw, 8rem) / 1 var(--font-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--royal);
+}
+.tally.duo {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.tally.duo span {
+  overflow-wrap: anywhere;
+}
+.tally > .won {
+  border-color: var(--marker-lip);
+  background: var(--marker-soft);
+}
+.done-screen .battle-won {
+  color: var(--marker-lip);
+  filter: drop-shadow(0 8px 0 color-mix(in srgb, var(--marker-lip) 30%, transparent));
+}
+.done-screen .battle-lost,
+.done-screen .battle-draw {
+  color: var(--ink-2);
+  filter: none;
+}
+.ranks {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rank {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+}
+.rank b {
+  overflow-wrap: anywhere;
+}
+.rank > .muted {
+  grid-column: 2;
+  font-size: 0.88rem;
+}
+.rank .pos {
+  grid-row: span 2;
+  font-weight: 800;
+  text-align: center;
+}
+.rank .pos .icon {
+  width: 24px;
+  height: 24px;
+  color: var(--marker-lip);
+}
+.rank.me {
+  background: var(--royal-soft);
 }
 
 /* ---------- Profil ---------- */
