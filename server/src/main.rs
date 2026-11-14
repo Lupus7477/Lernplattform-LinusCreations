@@ -811,6 +811,9 @@ async fn secure_headers(State(s): State<Arc<Srv>>, req: Request, next: Next) -> 
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     if api {
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    } else {
+        // Ohne Angabe hält der Browser alte JS-Module fest und neue Versionen tauchen nach dem Deploy nicht auf; no-cache fragt jedes Mal nach (meist 304).
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     }
     // Nur mit echtem Zertifikat: nach einer Warnung beim eigenen Zertifikat käme man sonst nie mehr auf die Seite.
     if s.hsts {
