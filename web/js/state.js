@@ -1,6 +1,6 @@
 // Gemeinsamer Zustand der App + Bausteine, die mehrere Ansichten nutzen.
 import { call } from "./api.js";
-import { gb, h, icon, pref } from "./ui.js";
+import { gb, h, icon, pref, toast } from "./ui.js";
 
 export const state = {
   /** { mode: "local" | "server", user: { name, admin } | null } */
@@ -42,6 +42,7 @@ export async function loadCourses() {
 
 export async function loadStats() {
   state.stats = await call("stats");
+  if (state.stats.notice) toast(state.stats.notice); // gerade eingesetzter Pausentag, kommt nur einmal
   emit("stats", state.stats);
   return state.stats;
 }

@@ -5,6 +5,7 @@ pub mod api;
 pub mod db;
 pub mod import;
 pub mod learn;
+pub mod motivation;
 pub mod report;
 
 use std::path::Path;

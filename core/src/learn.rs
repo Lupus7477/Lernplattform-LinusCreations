@@ -1,6 +1,6 @@
 //! Lernlogik ohne KI: Antwortprüfung, Wiederholungs-Boxen (Leitner), XP, Streak.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -119,24 +119,76 @@ pub fn lesson_xp(correct: i64, total: i64) -> i64 {
     2 * correct + 5 + perfect
 }
 
-/// Streak = Anzahl aufeinanderfolgender Lerntage, die heute oder gestern endet.
-/// `days` = Tagesnummern (beliebige Reihenfolge, Duplikate erlaubt).
-pub fn streak(days: &[i64], today: i64) -> i64 {
-    let mut d: Vec<i64> = days.to_vec();
+/// Streak = Anzahl Lerntage der Folge, die heute oder gestern endet.
+/// `days` = Tagesnummern (beliebige Reihenfolge, Duplikate erlaubt). `frozen` = Pausentage: halten die Folge zusammen, zählen aber nicht mit.
+pub fn streak(days: &[i64], frozen: &[i64], today: i64) -> i64 {
+    let mut d: Vec<i64> = days.iter().chain(frozen).copied().collect();
     d.sort_unstable_by(|a, b| b.cmp(a));
     d.dedup();
     let Some(&first) = d.first() else { return 0 };
     if first < today - 1 {
         return 0;
     }
-    let mut n = 1;
+    let mut end = first;
     for w in d.windows(2) {
         if w[0] - w[1] != 1 {
             break;
         }
-        n += 1;
+        end = w[1];
     }
-    n
+    let mut real: Vec<i64> = days.iter().copied().filter(|x| (end..=first).contains(x)).collect();
+    real.sort_unstable();
+    real.dedup();
+    real.len() as i64
+}
+
+/// Persönlicher Rekord: die Folge mit den meisten Lerntagen. Pausentage halten sie zusammen, zählen aber nicht mit (wie [`streak`]).
+pub fn best_streak(days: &[i64], frozen: &[i64]) -> i64 {
+    let real: HashSet<i64> = days.iter().copied().collect();
+    let mut d: Vec<i64> = days.iter().chain(frozen).copied().collect();
+    d.sort_unstable();
+    d.dedup();
+    let (mut best, mut run) = (0, 0);
+    for (i, x) in d.iter().enumerate() {
+        if i > 0 && x - d[i - 1] != 1 {
+            run = 0;
+        }
+        run += i64::from(real.contains(x));
+        best = best.max(run);
+    }
+    best
+}
+
+/// Pausentage einsetzen: Fehlen seit `last` (letzter Lern- oder Pausentag) 1 bis `credits` Tage bis gestern,
+/// werden genau diese Tage überbrückt. Reicht der Vorrat nicht, ist die Serie vorbei und der Vorrat bleibt.
+pub fn bridge(last: Option<i64>, today: i64, credits: i64) -> Vec<i64> {
+    match last {
+        Some(l) if l < today - 1 && today - 1 - l <= credits => (l + 1..today).collect(),
+        _ => vec![],
+    }
+}
+
+pub const MAX_LEVEL: i64 = 100;
+
+/// Level aus allen XP: von Level n zu n+1 braucht es 40 + 20·(n−1) XP. → (Level, XP im Level, XP bis zum nächsten).
+pub fn level(total_xp: i64) -> (i64, i64, i64) {
+    let (mut lvl, mut rest) = (1, total_xp.max(0));
+    loop {
+        let need = 40 + 20 * (lvl - 1);
+        if lvl >= MAX_LEVEL || rest < need {
+            return (lvl, rest, need);
+        }
+        rest -= need;
+        lvl += 1;
+    }
+}
+
+// ponytail: feste Titel je 10 Level; Wörter frei änderbar.
+const TITLES: [&str; 10] = ["Erste Schritte", "Neugierig", "Wissbegierig", "Fleißig", "Sattelfest", "Kenntnisreich", "Souverän", "Meisterhaft", "Brillant", "Legendär"];
+
+/// Titel zum Level (je 10 Level ein neuer, Level 100 = der letzte).
+pub fn title(level: i64) -> &'static str {
+    TITLES[((level.clamp(1, MAX_LEVEL) - 1) / 10).min(9) as usize]
 }
 
 /// Kleiner Zufallsgenerator zum Mischen (kein Krypto, nur Reihenfolge).
@@ -215,10 +267,37 @@ mod tests {
     fn xp_and_streak() {
         assert_eq!(lesson_xp(10, 10), 30);
         assert_eq!(lesson_xp(7, 10), 19);
-        assert_eq!(streak(&[], 100), 0);
-        assert_eq!(streak(&[100, 99, 99, 98, 96], 100), 3);
-        assert_eq!(streak(&[99, 98], 100), 2); // gestern zählt noch
-        assert_eq!(streak(&[98, 97], 100), 0); // vorgestern = gerissen
+        assert_eq!(streak(&[], &[], 100), 0);
+        assert_eq!(streak(&[100, 99, 99, 98, 96], &[], 100), 3);
+        assert_eq!(streak(&[99, 98], &[], 100), 2); // gestern zählt noch
+        assert_eq!(streak(&[98, 97], &[], 100), 0); // vorgestern = gerissen
+        // Pausentag 99 hält die Folge zusammen, zählt aber nicht mit
+        assert_eq!(streak(&[98, 97, 96], &[99], 100), 3);
+        assert_eq!(streak(&[100, 98, 97], &[99], 100), 3);
+        assert_eq!(streak(&[], &[99], 100), 0);
+        assert_eq!(best_streak(&[1, 2, 3, 7, 8, 8, 9, 10, 20], &[]), 4);
+        assert_eq!(best_streak(&[1, 2, 4, 5], &[3]), 4); // wie streak: Pausentag verbindet, zählt nicht
+        assert_eq!(best_streak(&[], &[]), 0);
+    }
+
+    #[test]
+    fn freeze_bridge() {
+        assert_eq!(bridge(Some(98), 100, 1), vec![99]); // gestern verpasst, 1 auf Vorrat
+        assert_eq!(bridge(Some(97), 100, 2), vec![98, 99]);
+        assert_eq!(bridge(Some(97), 100, 1), Vec::<i64>::new()); // Vorrat reicht nicht
+        assert_eq!(bridge(Some(99), 100, 2), Vec::<i64>::new()); // nichts verpasst
+        assert_eq!(bridge(None, 100, 2), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn levels() {
+        assert_eq!(level(0), (1, 0, 40));
+        assert_eq!(level(39), (1, 39, 40));
+        assert_eq!(level(40), (2, 0, 60));
+        assert_eq!(level(100), (3, 0, 80));
+        assert_eq!(level(1080).0, 10);
+        assert_eq!(level(i64::MAX / 4).0, MAX_LEVEL);
+        assert_eq!((title(1), title(10), title(11), title(100)), ("Erste Schritte", "Erste Schritte", "Neugierig", "Legendär"));
     }
 
     #[test]

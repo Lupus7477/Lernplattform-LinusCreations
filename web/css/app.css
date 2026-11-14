@@ -2592,6 +2592,172 @@ textarea.input {
   font: 700 0.78rem/1 var(--font-text);
 }
 
+/* ---------- Motivation: Level, Erfolge, Pausentage ---------- */
+.cheer {
+  max-width: 34ch;
+  margin: 0;
+  font: 700 1.1rem/1.35 var(--font-text);
+  text-wrap: balance;
+}
+.compare {
+  margin: 0;
+  font-weight: 700;
+  color: var(--right-ink);
+  font-variant-numeric: tabular-nums;
+}
+.level-up {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 14px;
+  border-radius: var(--pill);
+  background: var(--marker-soft);
+  color: var(--ink);
+  font-weight: 800;
+  animation: ignite 620ms var(--ease-out) both;
+}
+.level-up .icon {
+  color: var(--marker-ink);
+}
+.level-bar {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+}
+.level-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+.level-head .num,
+.level-head span {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--ink-2);
+}
+.level-num {
+  font: 800 2rem/1 var(--font-display);
+  letter-spacing: -0.02em;
+}
+.level-card {
+  display: grid;
+  gap: 12px;
+}
+.level-bar .bar {
+  height: 12px;
+  border-radius: var(--pill);
+  background: var(--line);
+  position: relative;
+}
+.level-bar .bar > i {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--marker);
+  clip-path: inset(0 calc((1 - var(--p, 0)) * 100%) 0 0 round 999px);
+  transition: clip-path 900ms var(--ease-out) 250ms;
+}
+.new-badges {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+.new-badges .q-kind {
+  margin: 0;
+}
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--pill);
+  border: 2px solid var(--marker-lip);
+  background: var(--marker-soft);
+  color: var(--ink);
+  font-weight: 700;
+  animation: pop 320ms var(--ease-out) both;
+}
+.badge:nth-child(2) {
+  animation-delay: 80ms;
+}
+.badge:nth-child(n + 3) {
+  animation-delay: 160ms;
+}
+.badge .icon {
+  width: 18px;
+  height: 18px;
+  color: var(--marker-ink);
+}
+.badge-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+.badge-tile {
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 4px;
+  padding: 12px;
+  border-radius: var(--r);
+  border: 2px solid var(--marker-lip);
+  background: var(--marker-soft);
+  color: var(--ink);
+}
+.badge-tile .icon {
+  width: 28px;
+  height: 28px;
+  color: var(--marker-ink);
+}
+.badge-tile span {
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
+.badge-tile.locked {
+  border-color: var(--line);
+  background: var(--paper);
+  color: var(--ink-2);
+}
+.badge-tile.locked .icon {
+  color: var(--ink-2);
+  opacity: 0.45;
+}
+.freeze {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+.freeze .icon {
+  width: 32px;
+  height: 32px;
+  color: var(--royal);
+}
+.freeze p {
+  margin: 2px 0 0;
+}
+.card .tally {
+  margin-top: 14px;
+}
+.calendar .day.frozen {
+  background: var(--royal-soft);
+  color: var(--royal);
+}
+.calendar .day.frozen .icon {
+  width: 18px;
+  height: 18px;
+}
+
 /* ---------- Weniger Bewegung ---------- */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -2599,6 +2765,9 @@ textarea.input {
   *::after {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
+  }
+  .level-bar .bar > i {
+    transition: none;
   }
   .sheet,
   .sheet.open,

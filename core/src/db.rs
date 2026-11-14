@@ -121,6 +121,20 @@ CREATE INDEX battles_b_course ON battles(b_course);
 PRAGMA user_version = 5;
 ";
 
+/// Version 6: Motivation. `users.freezes` = Pausentage auf Vorrat (0–2), `frozen` = Tage (julianday wie in den Statistiken),
+/// die ein Pausentag überbrückt hat. `badges` = freigeschaltete Erfolge. `cheers` = von der KI geschriebene, vom Code geprüfte
+/// Motivationstexte je Anlass (für alle gleich).
+const V6: &str = "
+ALTER TABLE users ADD COLUMN freezes INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE frozen(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day INTEGER NOT NULL, PRIMARY KEY(user_id, day)) WITHOUT ROWID;
+CREATE TABLE badges(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(user_id, id)) WITHOUT ROWID;
+CREATE TABLE cheers(id INTEGER PRIMARY KEY, occasion TEXT NOT NULL, text TEXT NOT NULL);
+CREATE INDEX cheers_occasion ON cheers(occasion);
+PRAGMA user_version = 6;
+";
+
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
@@ -146,6 +160,9 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     }
     if version < 5 {
         conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V5} COMMIT; PRAGMA foreign_keys = ON;"))?;
+    }
+    if version < 6 {
+        conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V6} COMMIT; PRAGMA foreign_keys = ON;"))?;
     }
     Ok(conn)
 }
@@ -178,6 +195,7 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Resul
 /// 3. noch nicht analysierte Abschnitte
 /// 4. Prüfungsthemen der übrigen Einheiten
 /// 5. Fragen geänderter Abschnitte prüfen (PDF ersetzt)
+/// 6. Motivationstexte schreiben (nur wenn sonst nichts ansteht)
 pub enum Task {
     Questions { unit_id: i64, level: i64, text: String, topics: Vec<String> },
     /// `filter` = Organisatorisches aussortieren (aus, wenn der Nutzer „Doch einbeziehen“ gewählt hat)
@@ -185,6 +203,7 @@ pub enum Task {
     /// `info` = Titel, Zusammenfassung, Begriffe und Anfang des Lerntexts
     Focus { unit_id: i64, topics: Vec<String>, info: String },
     Recheck { unit_id: i64, text: String },
+    Cheers { occasion: &'static str },
 }
 
 fn json_list(s: Option<String>) -> Vec<String> {
@@ -255,13 +274,14 @@ pub fn next_task(conn: &Connection) -> rusqlite::Result<Option<Task>> {
     if let Some(t) = focus_task(conn, false)? {
         return Ok(Some(t));
     }
-    conn.query_row(
-        "SELECT id, source_text, orga FROM units WHERE status = 'ready' AND q_state = 4 ORDER BY course_id, idx LIMIT 1",
-        [],
-        |r| {
+    let r = conn
+        .query_row("SELECT id, source_text, orga FROM units WHERE status = 'ready' AND q_state = 4 ORDER BY course_id, idx LIMIT 1", [], |r| {
             let (source, orga): (String, Option<String>) = (r.get(1)?, r.get(2)?);
             Ok(Task::Recheck { unit_id: r.get(0)?, text: crate::import::learn_text(&source, orga.as_deref()) })
-        },
-    )
-    .optional()
+        })
+        .optional()?;
+    if r.is_some() {
+        return Ok(r);
+    }
+    Ok(crate::motivation::wanted(conn).map(|occasion| Task::Cheers { occasion }))
 }

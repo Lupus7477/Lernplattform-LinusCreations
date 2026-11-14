@@ -418,7 +418,7 @@ fn grounded(q: &Question, text: &str) -> bool {
 }
 
 /// JSON-Antwort mit einer Grammatik, die erst zur Laufzeit feststeht (Enums aus der Aufgabe).
-fn ask_json<T: DeserializeOwned>(ai: &Ai, user: String, schema: &Value, max_tokens: usize) -> Result<T, AiError> {
+pub(crate) fn ask_json<T: DeserializeOwned>(ai: &Ai, user: String, schema: &Value, max_tokens: usize) -> Result<T, AiError> {
     let g = llama_cpp_2::json_schema_to_grammar(&schema.to_string()).map_err(|e| AiError::Failed(format!("Grammatik: {e}")))?;
     let raw = ai.generate_background(
         Gen { messages: vec![Msg { role: "system", content: SYSTEM.into() }, Msg { role: "user", content: user }], grammar: Some(&g), max_tokens, temperature: 0.1 },
@@ -697,6 +697,7 @@ pub fn spawn_worker(db: Db, ai: Arc<Ai>, wake: Receiver<()>, notify: impl Fn(i64
             Task::Focus { unit_id, .. } => format!("Prüfungsthemen Einheit {unit_id}"),
             Task::Questions { unit_id, level, .. } => format!("Fragen Einheit {unit_id} (Stufe {level})"),
             Task::Recheck { unit_id, .. } => format!("Prüfung Einheit {unit_id}"),
+            Task::Cheers { occasion } => format!("Motivation „{occasion}“"),
         };
         match run_task(&db, &ai, task, &notify) {
             Ok(course_id) => {
@@ -866,6 +867,11 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
             let _ = conn.execute("UPDATE units SET q_state = 1, q_level = MAX(q_level - 1, 0) WHERE id = ?1 AND q_state = 4", [unit_id]);
             Ok(course_id)
         }
+        // Kein Kurs betroffen: 0 wie bei einem Fehler, die Oberfläche muss nichts neu laden.
+        Task::Cheers { occasion } => crate::motivation::write(db, ai, occasion).map(|n| {
+            eprintln!("[import] Motivation „{occasion}“: {n} Texte übernommen");
+            0
+        }),
     }
 }
 

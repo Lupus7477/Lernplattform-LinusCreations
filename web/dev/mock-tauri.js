@@ -130,10 +130,13 @@ const db = {
   lessons: q.has("empty")
     ? []
     : [
-        { unit_id: 1, xp: 22, at: now() - 1 * DAY },
-        { unit_id: 2, xp: 17, at: now() - 2 * DAY },
-        { unit_id: 1, xp: 25, at: now() - 4 * DAY },
+        { unit_id: 1, xp: 22, correct: 7, total: 9, at: now() - 1 * DAY },
+        { unit_id: 2, xp: 17, correct: 5, total: 8, at: now() - 2 * DAY },
+        { unit_id: 1, xp: 25, correct: 6, total: 9, at: now() - 4 * DAY },
       ],
+  // Motivation: Erfolge (id → Zeitpunkt), Pausentage auf Vorrat
+  badges: q.has("empty") ? {} : { first: now() - 4 * DAY },
+  freezes: 1,
   nextId: 100,
 };
 if (q.has("empty")) db.units = [];
@@ -160,6 +163,25 @@ function streak() {
   for (let i = 1; i < days.length && days[i - 1] - days[i] === 1; i++) n++;
   return n;
 }
+// Wie core/src/learn.rs (level, title) und core/src/motivation.rs (Auszug der Erfolge)
+const TITLES = ["Erste Schritte", "Neugierig", "Wissbegierig", "Fleißig", "Sattelfest", "Kenntnisreich", "Souverän", "Meisterhaft", "Brillant", "Legendär"];
+function level(xp) {
+  let lvl = 1;
+  for (;;) {
+    const need = 40 + 20 * (lvl - 1);
+    if (lvl >= 100 || xp < need) return [lvl, xp, need];
+    xp -= need;
+    lvl++;
+  }
+}
+const BADGES = [
+  { id: "first", title: "Los geht's", desc: "Schließe deine erste Lektion ab.", icon: "star-fill" },
+  { id: "ten", title: "Dranbleiben", desc: "Schließe 10 Lektionen ab.", icon: "cards" },
+  { id: "perfect", title: "Fehlerfrei", desc: "Schaffe eine Lektion mit mindestens 5 Aufgaben ohne Fehler.", icon: "sparkle" },
+  { id: "run10", title: "Im Fluss", desc: "Beantworte 10 Aufgaben hintereinander richtig.", icon: "fire-fill" },
+  { id: "week", title: "Eine Woche", desc: "Lerne 7 Tage in Folge.", icon: "calendar-blank" },
+  { id: "level10", title: "Level 10", desc: "Erreiche Level 10.", icon: "trophy" },
+];
 function stats() {
   const xpOn = (d) => db.lessons.filter((l) => new Date(l.at * 1000).toLocaleDateString("sv-SE") === d).reduce((a, l) => a + l.xp, 0);
   const week = [6, 5, 4, 3, 2, 1, 0].map((o) => ({ day: day(o), xp: xpOn(day(o)) }));
@@ -172,6 +194,12 @@ function stats() {
     due: visible().filter((x) => x.box > 0 && x.due_at <= now()).length,
     week,
     active_days: [...new Set(db.lessons.map((l) => new Date(l.at * 1000).toLocaleDateString("sv-SE")))],
+    ...(([lvl, inLevel, need]) => ({ level: lvl, level_xp: inLevel, level_need: need, title: TITLES[Math.min(9, Math.floor((lvl - 1) / 10))] }))(level(db.lessons.reduce((a, l) => a + l.xp, 0))),
+    best_streak: Math.max(streak(), q.has("empty") ? 0 : 4),
+    freezes: db.freezes,
+    frozen_days: q.has("empty") ? [] : [day(3)],
+    accuracy: Math.round((100 * db.lessons.reduce((a, l) => a + (l.correct ?? 0), 0)) / Math.max(1, db.lessons.reduce((a, l) => a + (l.total ?? 0), 0))),
+    notice: null,
   };
 }
 const shuffle = (a) => [...a].sort(() => Math.random() - 0.5);
@@ -434,11 +462,32 @@ const handlers = {
     { name: "Lea", me: false, xp: 75, battles: 0, wins: 0 },
   ],
   stats: () => stats(),
-  finish_lesson: ({ unitId, correct, total }) => {
+  finish_lesson: ({ unitId, correct, total, bestRun = 0 }) => {
+    const before = [...db.lessons].reverse().find((l) => unitId != null && l.unit_id === unitId && l.total);
+    const was = stats();
     const xp = 2 * correct + 5 + (total > 0 && correct >= total ? 5 : 0);
-    db.lessons.push({ unit_id: unitId, xp, at: now() });
-    return { xp, stats: stats() };
+    db.lessons.push({ unit_id: unitId, xp, correct, total, at: now() });
+    const s = stats();
+    // Mock: „Im Fluss“ schon ab 3 in Folge, damit man die Erfolgs-Chips sieht
+    const fresh = BADGES.filter((b) => !db.badges[b.id] && ((b.id === "perfect" && total >= 5 && correct >= total) || (b.id === "run10" && bestRun >= 3)));
+    fresh.forEach((b) => (db.badges[b.id] = now()));
+    const next = db.units.find((u) => u.status === "ready" && u.id !== unitId && !db.lessons.some((l) => l.unit_id === u.id));
+    const acc = Math.round((100 * correct) / Math.max(1, total));
+    const level_up = s.level > was.level;
+    const cheer = level_up
+      ? `Level ${s.level} erreicht: ${s.title}. Stark!`
+      : fresh.length
+        ? `Neuer Erfolg: ${fresh[0].title}. Verdient!`
+        : before && acc > Math.round((100 * before.correct) / before.total)
+          ? `Besser als beim letzten Mal in „${db.units.find((u) => u.id === unitId)?.title}“. Das ist echter Fortschritt.`
+          : total > 0 && correct >= total
+            ? "Fehlerfrei. Das sitzt!"
+            : acc < 50
+              ? "Drangeblieben, obwohl es schwer war. Genau so lernt man."
+              : "Lektion geschafft. Gut gemacht!";
+    return { xp, stats: s, level_up, badges: fresh, before: before ? { correct: before.correct, total: before.total } : null, next: next ? { unit_id: next.id, title: next.title, why: "Als Nächstes im Lernpfad" } : null, cheer };
   },
+  badges: () => BADGES.map((b) => ({ ...b, at: db.badges[b.id] ?? null })),
   set_goal: ({ xp }) => (db.goal = xp),
   retry_questions: () => null,
   unit_questions: ({ unitId }) => db.questions.filter((x) => x.unit_id === unitId).map(full),
@@ -560,6 +609,17 @@ function storeFigures(documentId, figures) {
 
 class Channel {
   onmessage = null;
+}
+
+// Erfolgsfragen wie im Kern, im Mock schon ab Box 2 (sonst gäbe es in den Beispieldaten keine)
+{
+  const plain = handlers.start_lesson;
+  handlers.start_lesson = (a) => {
+    const r = plain(a);
+    if (!r.ready) return { ...r, boost: [], cheers: [] };
+    const known = visible().filter((x) => x.box >= 2 && ["mc", "true_false", "fill_blank"].includes(x.kind) && !r.exercises.some((e) => e.id === x.id));
+    return { ...r, boost: shuffle(known).slice(0, 3).map(toExercise), cheers: ["Siehst du, das sitzt!", "Na also, das kannst du.", "Genau, das hast du drauf."] };
+  };
 }
 
 window.__TAURI__ = {

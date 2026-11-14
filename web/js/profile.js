@@ -11,36 +11,74 @@ const iso = (d) => d.toLocaleDateString("sv-SE"); // JJJJ-MM-TT in lokaler Zeit
 
 export async function render() {
   const page = h("div.page");
-  const [stats, tiers, about] = await Promise.all([loadStats(), call("ai_tiers"), aboutCard()]);
+  const [stats, tiers, about, badges] = await Promise.all([loadStats(), call("ai_tiers"), aboutCard(), call("badges").catch(() => [])]);
   // Konto-Karten einmal bauen: das Neuzeichnen bei KI-Statusmeldungen soll nicht jedes Mal den Server fragen.
   const user = state.session?.user;
   const server = user
     ? [accountCard(user), devicesCard(), user.admin ? membersCard() : null]
     : window.__TAURI__ && state.session?.mode === "local" ? [connectCard()] : [];
-  const draw = () => page.replaceChildren(...content(stats, tiers, server), about);
+  const draw = () => page.replaceChildren(...content(stats, tiers, server, badges), about);
   draw();
   page.cleanup = subscribe((kind) => kind === "ai" && draw());
   return page;
 }
 
-function content(s, tiers, server) {
+function content(s, tiers, server, badges) {
   return [
     h("h1", "Profil"),
     h(
+      "div.card.level-card",
+      h("div.level-head", h("b.level-num", `Level ${s.level}`), h("span", s.title)),
+      h("div.level-bar", h("div.bar", { role: "progressbar", "aria-label": `Level ${s.level}`, "aria-valuemin": "0", "aria-valuemax": String(s.level_need), "aria-valuenow": String(s.level_xp) }, h("i", { style: { "--p": String(s.level_xp / s.level_need) } }))),
+      h("p.muted.num", `Noch ${s.level_need - s.level_xp} XP bis Level ${s.level + 1}. Insgesamt ${s.total_xp} XP aus ${s.lessons} ${s.lessons === 1 ? "Lektion" : "Lektionen"}.`),
+    ),
+    h(
       "div.card",
       h("div.hero-stat", icon("fire-fill"), h("div", h("b", String(s.streak)), h("p.muted", s.streak === 1 ? "Tag in Folge" : "Tage in Folge"))),
-      h("p.muted.num", `Insgesamt ${s.total_xp} XP aus ${s.lessons} ${s.lessons === 1 ? "Lektion" : "Lektionen"}.`),
+      h("div.tally", h("div", h("b", String(s.best_streak)), h("span", "Rekord")), h("div", h("b", `${s.accuracy} %`), h("span", "Treffer")), h("div", h("b", String(s.lessons)), h("span", "Lektionen"))),
+      h(
+        "div.freeze",
+        icon("snowflake"),
+        h(
+          "div",
+          h("b", `${s.freezes} ${s.freezes === 1 ? "Pausentag" : "Pausentage"} auf Vorrat`),
+          h("p.hint", "Für je 7 Tage in Folge gibt es einen Pausentag, höchstens 2. Verpasst du einen Tag, rettet er deine Serie automatisch."),
+        ),
+      ),
     ),
-    h("div.card", h("h2", "Letzte 6 Wochen"), calendar(s.active_days)),
+    h("div.card", h("h2", "Letzte 6 Wochen"), calendar(s.active_days, s.frozen_days)),
+    badges.length ? badgeCard(badges) : null,
     h("div.card", h("h2", "Diese Woche"), week(s.week, s.goal)),
     settings(s),
     ...server.filter(Boolean),
     aiCard(tiers),
-  ];
+  ].filter(Boolean);
 }
 
-function calendar(active) {
+/** Erfolge: freigeschaltete farbig mit Datum, gesperrte blass mit ihrem Ziel. */
+function badgeCard(badges) {
+  const got = badges.filter((b) => b.at).length;
+  return h(
+    "div.card",
+    h("h2", `Erfolge · ${got} von ${badges.length}`),
+    h(
+      "div.badge-grid",
+      badges.map((b) =>
+        h(
+          `div.badge-tile${b.at ? "" : ".locked"}`,
+          { "aria-label": `${b.title}: ${b.at ? "freigeschaltet" : b.desc}` },
+          icon(b.icon),
+          h("b", b.title),
+          h("span", b.at ? `Seit ${new Date(b.at * 1000).toLocaleDateString("de-DE")}` : b.desc),
+        ),
+      ),
+    ),
+  );
+}
+
+function calendar(active, frozen = []) {
   const on = new Set(active);
+  const ice = new Set(frozen);
   const today = new Date();
   today.setHours(12, 0, 0, 0);
   const end = new Date(today);
@@ -51,12 +89,13 @@ function calendar(active) {
   for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
     const key = iso(d);
     const isOn = on.has(key);
+    const isIce = !isOn && ice.has(key);
     const future = d > today;
     cells.push(
       h(
-        `span.day${isOn ? ".on" : ""}${key === iso(today) ? ".today" : ""}`,
-        { title: d.toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }), style: future ? { opacity: "0.35" } : undefined, "aria-label": `${d.toLocaleDateString("de-DE")}${isOn ? ", gelernt" : ""}` },
-        isOn ? icon("fire-fill") : String(d.getDate()),
+        `span.day${isOn ? ".on" : isIce ? ".frozen" : ""}${key === iso(today) ? ".today" : ""}`,
+        { title: d.toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }), style: future ? { opacity: "0.35" } : undefined, "aria-label": `${d.toLocaleDateString("de-DE")}${isOn ? ", gelernt" : isIce ? ", Pausentag" : ""}` },
+        isOn ? icon("fire-fill") : isIce ? icon("snowflake") : String(d.getDate()),
       ),
     );
   }
@@ -79,6 +118,8 @@ function week(days, goal) {
 function settings(s) {
   const soundSwitch = h("input.switch", { type: "checkbox", id: "sound", checked: pref.get("sound", "on") === "on" });
   soundSwitch.addEventListener("change", () => pref.set("sound", soundSwitch.checked ? "on" : "off"));
+  const explainSwitch = h("input.switch", { type: "checkbox", id: "reexplain", checked: pref.get("reexplain", "on") === "on" });
+  explainSwitch.addEventListener("change", () => pref.set("reexplain", explainSwitch.checked ? "on" : "off"));
   return h(
     "div.card",
     h("h2", "Einstellungen"),
@@ -98,6 +139,11 @@ function settings(s) {
       h("span.hint", "Eine Lektion bringt etwa 15 bis 30 XP."),
     ),
     h("div.row.between", h("label", { for: "sound", style: { "font-weight": "700" } }, "Töne bei Antworten"), soundSwitch),
+    h(
+      "div.field",
+      h("div.row.between", h("label", { for: "reexplain", style: { "font-weight": "700" } }, "Neu erklären nach 4 Fehlern"), explainSwitch),
+      h("span.hint", "Nach 4 falschen Antworten in Folge erklärt die KI den Stoff einfacher, als Folie zwischendurch."),
+    ),
     canRemind() ? reminder(s) : null,
     h(
       "div.field",
