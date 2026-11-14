@@ -1,7 +1,7 @@
 // Lektion: eine Aufgabe nach der anderen, Prüfen ohne KI, falsche Aufgaben kommen am Ende erneut.
 import { call, stream } from "./api.js";
 import { confetti, confirmSheet, countUp, flip, h, icon, markdown, openSheet, pref, reduceMotion, shake, sound, toast, zoomable } from "./ui.js";
-import { currentCourse, emit, state, subscribe } from "./state.js";
+import { emit, state, subscribe } from "./state.js";
 import { editQuestion, openChat } from "./unit.js";
 import { fail, openReport } from "./report.js";
 
@@ -50,7 +50,8 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   let queue = [];
   let total = 0;
   let solved = 0;
-  let firstRight = 0;
+  let firsts = 0; // beantwortete Aufgaben (erster Versuch), für „Beenden“: XP bis hierher
+  let matched = null; // Zuordnen-Runde beim ersten Versuch geschafft? (die einzige Aufgabe, die der Server nicht selbst prüft)
   let run = 0;
   let bestRun = 0;
   let miss = 0; // falsch in Folge, nur normale Aufgaben (Erfolgsfragen zählen nicht)
@@ -518,10 +519,13 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     phase = "feedback";
     lastOk = ok;
     const ex = cur.ex;
+    if (!ex.boost && !ex.retry) {
+      firsts++;
+      if (ex.kind === "match") matched = ok;
+    }
     // Erfolgsfragen zählen weder zum Fortschritt noch zu den XP und kommen nicht nochmal, sie geben nur ein Erfolgserlebnis.
     if (ok) {
       if (!ex.boost) {
-        if (!ex.retry) firstRight++;
         solved++;
         miss = 0;
         missed.length = 0;
@@ -721,7 +725,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     menuBtn.hidden = true;
     let res;
     try {
-      res = await call("finish_lesson", { unitId, correct: firstRight, total, bestRun, courseId: unitId ? null : (wrongCourse ?? examCourse ?? currentCourse()?.id ?? null) });
+      res = await call("finish_lesson", finishArgs());
     } catch (e) {
       fail(e);
       return exit();
@@ -729,7 +733,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     state.stats = res.stats;
     emit("stats", res.stats);
     const s = res.stats;
-    const acc = Math.round((firstRight / Math.max(1, total)) * 100);
+    const acc = Math.round((res.correct / Math.max(1, res.total)) * 100); // gezählt vom Server
     const secs = Math.round((Date.now() - t0) / 1000);
     const grew = s.streak > streakBefore;
     const goalNow = s.xp_today >= s.goal && s.xp_today - res.xp < s.goal;
@@ -957,6 +961,23 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   closeBtn.addEventListener("click", askClose);
   menuBtn.addEventListener("click", questionMenu);
 
+  /** Richtig/gesamt zählt der Server aus den Antworten. Die tägliche Wiederholung schickt keinen Kurs: Ihre XP zählen in den Kursen der Fragen. */
+  function finishArgs(partial = false) {
+    return { unitId, courseId: wrongCourse ?? examCourse ?? null, bestRun, matched, partial };
+  }
+
+  /** Abgebrochen: Lerntag und XP für das Beantwortete trotzdem gutschreiben (ohne Abschlussseite und Erfolge). */
+  async function saveSoFar() {
+    try {
+      const res = await call("finish_lesson", finishArgs(true));
+      state.stats = res.stats;
+      emit("stats", res.stats);
+      if (res.xp) toast(`+${res.xp} XP gespeichert`);
+    } catch (e) {
+      fail(e);
+    }
+  }
+
   async function askClose() {
     if (battleId && battle?.state === "running" && phase !== "done") {
       const quit = await confirmSheet({ title: "Battle aufgeben?", text: "Das zählt als verloren.", confirm: "Aufgeben", cancel: "Weiterspielen", danger: true });
@@ -966,12 +987,14 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     if (phase === "done" || phase === "loading" || total === 0) return exit();
     const leave = await confirmSheet({
       title: "Lektion beenden?",
-      text: "Deine Antworten sind gespeichert. XP gibt es aber erst, wenn du die Lektion abschließt.",
+      text: firsts ? "Deine Antworten und die XP bis hierher bleiben gespeichert. Den Bonus fürs Abschließen gibt es am Ende." : "Du hast noch nichts beantwortet.",
       confirm: "Beenden",
       cancel: "Weiterlernen",
       danger: true,
     });
-    if (leave) exit();
+    if (!leave) return;
+    if (firsts) saveSoFar();
+    exit();
   }
 
   function onKey(e) {

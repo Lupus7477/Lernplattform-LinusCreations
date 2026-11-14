@@ -495,7 +495,8 @@ pub fn verify_task(ai: &Ai, text: &str, q: Question) -> Result<Option<Question>,
     }
 }
 
-/// Nach dem Ersetzen eines PDFs: Stimmt die Frage noch? Die KI löst sie blind am neuen Text; weicht ihre Antwort ab, ist sie veraltet (None).
+/// Stimmt die Frage? Die KI löst sie blind am Text; weicht ihre Antwort ab, ist sie falsch oder veraltet (None).
+/// Läuft nach dem Schreiben neuer Fragen (Selbstprüfung) und nach dem Ersetzen eines PDFs.
 /// Strukturaufgaben laufen durch die Selbstprüfung (Matrix darf Aussagen verlieren), Grafik-Aufgaben bleiben.
 pub fn recheck(ai: &Ai, text: &str, q: Question) -> Result<Option<Question>, AiError> {
     if !matches!(q.kind.as_str(), "mc" | "true_false" | "fill_blank") {
@@ -785,7 +786,23 @@ fn run_task(db: &Db, ai: &Ai, task: Task, notify: &dyn Fn(i64)) -> Result<i64, A
             Ok(course_id)
         }
         Task::Questions { unit_id, level, text, topics } => {
-            let result = generate_questions(ai, &text, level, &topics);
+            // Selbstprüfung auch für MC, Richtig/Falsch und Lücke (ohne Datenbank-Sperre): Die KI löst jede Frage blind am Text,
+            // weicht sie ab, fliegt die Frage. Scheitert die Prüfung selbst, bleibt die Frage (wie beim Ersetzen eines PDFs).
+            let result = generate_questions(ai, &text, level, &topics).and_then(|qs| {
+                let mut kept = Vec::new();
+                for q in qs {
+                    match recheck(ai, &text, q.clone()) {
+                        Ok(Some(q)) => kept.push(q),
+                        Ok(None) => eprintln!("[import] Selbstprüfung verworfen: {}", q.prompt),
+                        Err(AiError::NotReady) => return Err(AiError::NotReady),
+                        Err(AiError::Failed(e)) => {
+                            eprintln!("[import] Selbstprüfung Einheit {unit_id}: {e}");
+                            kept.push(q);
+                        }
+                    }
+                }
+                Ok(kept)
+            });
             let course_id = {
                 let conn = db.lock().unwrap();
                 let course_id: i64 = conn.query_row("SELECT course_id FROM units WHERE id = ?1", [unit_id], |r| r.get(0)).unwrap_or(0);

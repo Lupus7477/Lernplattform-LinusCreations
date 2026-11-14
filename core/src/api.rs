@@ -44,8 +44,9 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
     fn ok<T: Serialize>(t: T) -> R<Value> {
         serde_json::to_value(t).map_err(err)
     }
-    // Während eines Battles keine Lösungen über die normalen Befehle (sonst ließe sich jede Antwort vorher nachschlagen).
-    if matches!(cmd, "answer" | "question" | "unit_questions") && in_battle(&c.db.lock().unwrap(), who)? {
+    // Während eines Battles keine Lösungen über die normalen Befehle (sonst ließe sich jede Antwort vorher nachschlagen)
+    // und keine Änderungen an Fragen (sonst ließe sich die Lösung passend umschreiben).
+    if matches!(cmd, "answer" | "question" | "unit_questions" | "update_question" | "create_question" | "delete_question") && in_battle(&c.db.lock().unwrap(), who)? {
         return Err(IN_BATTLE.into());
     }
     match cmd {
@@ -134,6 +135,8 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
             let id = args!(v, { id: i64 });
             let conn = c.db.lock().unwrap();
             owner(role(&conn, who, id)?)?;
+            // Offene Herausforderungen mit dem Kurs fallen weg; gespielte Battles bleiben (Kurs wird NULL)
+            conn.execute("DELETE FROM battles WHERE a_course = ?1 AND b_id IS NULL", [id]).map_err(err)?;
             ok(conn.execute("DELETE FROM courses WHERE id = ?1", [id]).map_err(err)?)
         }
         "import_document" => {
@@ -235,18 +238,20 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
         "stats" => {
             let course_id = args!(v, { course_id: Option<i64> });
             let conn = c.db.lock().unwrap();
-            let course = course_id.filter(|id| role(&conn, who, *id).is_ok());
-            ok(stats_of(&conn, who, course)?)
+            let names = motivation::names(&conn, visible_course(&conn, who, course_id));
+            ok(stats_of(&conn, who, &names)?)
         }
+        // Richtig/gesamt zählt der Server selbst (Erstantworten über `answer`), der Client meldet nur die Zuordnen-Runde
         "finish_lesson" => {
-            let (unit_id, correct, total, best_run, course_id) = args!(v, { unit_id: Option<i64>, correct: i64, total: i64, best_run: Option<i64>, course_id: Option<i64> });
-            ok(finish_lesson(c, who, unit_id, correct, total, best_run.unwrap_or(0), course_id)?)
+            let (unit_id, course_id, best_run, matched, partial) =
+                args!(v, { unit_id: Option<i64>, course_id: Option<i64>, best_run: Option<i64>, matched: Option<bool>, partial: Option<bool> });
+            ok(finish_lesson(c, who, unit_id, course_id, best_run.unwrap_or(0), matched, partial.unwrap_or(false))?)
         }
         // Erfolge des Kurses (Namen von der KI) und die allgemeinen, freigeschaltete mit Zeitpunkt (Profil)
         "badges" => {
             let course_id = args!(v, { course_id: Option<i64> });
             let conn = c.db.lock().unwrap();
-            let course = course_id.filter(|id| role(&conn, who, *id).is_ok());
+            let course = visible_course(&conn, who, course_id);
             let got = |sql: &str, p: &[&dyn rusqlite::ToSql]| -> R<HashMap<String, i64>> {
                 let mut st = conn.prepare(sql).map_err(err)?;
                 let rows = st.query_map(p, |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?;
@@ -351,6 +356,7 @@ pub fn call(c: &Core, who: &Who, cmd: &str, v: Value, on_token: &mut dyn FnMut(&
             let question_id = args!(v, { question_id: i64 });
             let conn = c.db.lock().unwrap();
             owner(question_role(&conn, who, question_id)?)?;
+            question_in_battle(&conn, question_id)?;
             ok(conn.execute("DELETE FROM questions WHERE id = ?1", [question_id]).map_err(err)?)
         }
         _ => Err(format!("Unbekannter Befehl: {cmd}")),
@@ -740,6 +746,8 @@ struct UnitDetail {
     orga: usize,
     /// Passende Prüfungsthemen
     exam: Vec<String>,
+    /// Lerntext aus dem PDF (ohne Organisatorisches), zum Nachlesen am Original
+    text: String,
 }
 
 /// Prüfungsthemen einer Einheit aus `units.exam`.
@@ -764,12 +772,14 @@ fn unit(c: &Core, who: &Who, unit_id: i64) -> R<UnitDetail> {
     unit_role(&conn, who, unit_id)?;
     let mut d = conn
         .query_row(
-            "SELECT u.id, u.course_id, u.title, u.summary, u.explanation, u.page_from, u.page_to, d.name, u.orga, u.exam
+            "SELECT u.id, u.course_id, u.title, u.summary, u.explanation, u.page_from, u.page_to, d.name, u.orga, u.exam, u.source_text
              FROM units u JOIN documents d ON d.id = u.document_id WHERE u.id = ?1",
             [unit_id],
             |r| {
                 let orga: Option<String> = r.get(8)?;
+                let source: String = r.get(10)?;
                 Ok(UnitDetail {
+                    text: import::learn_text(&source, orga.as_deref()),
                     orga: orga.and_then(|o| serde_json::from_str::<Vec<usize>>(&o).ok()).map_or(0, |v| v.len()),
                     exam: topics(r.get(9)?),
                     id: r.get(0)?,
@@ -1083,7 +1093,7 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>, wrong_course: Option<
             exercises.insert(at, Exercise { kind: "match".into(), prompt: "Ordne die Begriffe zu".into(), pairs: terms, ..Default::default() });
         }
     }
-    Ok(LessonOut { ready: true, failed: false, exercises, boost, cheers: motivation::picks(&conn, scope, "boost", 3) })
+    Ok(LessonOut { ready: true, failed: false, exercises, boost, cheers: motivation::picks(&conn, &motivation::names(&conn, scope), "boost", 3) })
 }
 
 struct Picked {
@@ -1145,37 +1155,47 @@ fn grade(kind: &str, prompt: &str, options: &str, expected: &str, groups: &str, 
 /// Prüft ohne KI. `retry` = Wiederholung innerhalb derselben Lektion → Box bleibt unverändert.
 fn answer(c: &Core, who: &Who, question_id: i64, given: &str, retry: bool) -> R<AnswerOut> {
     let conn = c.db.lock().unwrap();
-    let (out, boxed) = graded(&conn, who, question_id, given)?;
+    let (out, boxed, due) = graded(&conn, who, question_id, given)?;
     if !retry {
-        let b = learn::next_box(boxed, out.correct);
-        conn.execute(
-            "INSERT INTO progress(user_id, question_id, box, due_at, wrong) VALUES(?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(user_id, question_id) DO UPDATE SET box = excluded.box, due_at = excluded.due_at, wrong = excluded.wrong",
-            params![who.id, question_id, b, learn::due_at(b, db::now()), !out.correct],
-        )
-        .map_err(err)?;
+        let now = db::now();
+        if out.correct && boxed > 0 && due > now {
+            // Richtig, aber noch nicht fällig (z. B. Lektion am selben Abend wiederholt): Box und Termin bleiben, sonst stiege
+            // die Frage ohne Abstand bis ganz nach oben. Üben zählt trotzdem (XP), und sie verlässt die Falsch-Liste.
+            conn.execute("UPDATE progress SET wrong = 0 WHERE user_id = ?1 AND question_id = ?2", params![who.id, question_id]).map_err(err)?;
+        } else {
+            let b = learn::next_box(boxed, out.correct);
+            conn.execute(
+                "INSERT INTO progress(user_id, question_id, box, due_at, wrong) VALUES(?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(user_id, question_id) DO UPDATE SET box = excluded.box, due_at = excluded.due_at, wrong = excluded.wrong",
+                params![who.id, question_id, b, learn::due_at(b, now), !out.correct],
+            )
+            .map_err(err)?;
+        }
+        // Erstantwort für die XP der Lektion: zählt der Server, nicht der Client
+        conn.execute("INSERT OR REPLACE INTO lesson_answers(user_id, question_id, correct) VALUES(?1, ?2, ?3)", params![who.id, question_id, out.correct])
+            .map_err(err)?;
     }
     Ok(out)
 }
 
-/// Antwort prüfen (mit Rechteprüfung), ohne etwas zu speichern. Dazu die aktuelle Box des Nutzers.
-fn graded(conn: &Connection, who: &Who, question_id: i64, given: &str) -> R<(AnswerOut, i64)> {
+/// Antwort prüfen (mit Rechteprüfung), ohne etwas zu speichern. Dazu Box und Fälligkeit des Nutzers.
+fn graded(conn: &Connection, who: &Who, question_id: i64, given: &str) -> R<(AnswerOut, i64, i64)> {
     question_role(conn, who, question_id)?;
     grade_question(conn, who, question_id, given)
 }
 
 /// Wie [`graded`], aber ohne Rechteprüfung: nur für Fragen, die der Server selbst zugeteilt hat (Battle).
-fn grade_question(conn: &Connection, who: &Who, question_id: i64, given: &str) -> R<(AnswerOut, i64)> {
-    let (kind, prompt, options, expected, why, groups, spots, boxed): (String, String, String, String, String, String, String, i64) = conn
+fn grade_question(conn: &Connection, who: &Who, question_id: i64, given: &str) -> R<(AnswerOut, i64, i64)> {
+    let (kind, prompt, options, expected, why, groups, spots, boxed, due): (String, String, String, String, String, String, String, i64, i64) = conn
         .query_row(
-            "SELECT q.kind, q.prompt, q.options, q.answer, q.why, q.groups, q.spots, COALESCE(p.box, 0) FROM questions q
+            "SELECT q.kind, q.prompt, q.options, q.answer, q.why, q.groups, q.spots, COALESCE(p.box, 0), COALESCE(p.due_at, 0) FROM questions q
              LEFT JOIN progress p ON p.question_id = q.id AND p.user_id = ?2 WHERE q.id = ?1",
             params![question_id, who.id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
         )
         .map_err(err)?;
     let (correct, solution) = grade(&kind, &prompt, &options, &expected, &groups, &spots, given);
-    Ok((AnswerOut { correct, expected, why, solution }, boxed))
+    Ok((AnswerOut { correct, expected, why, solution }, boxed, due))
 }
 
 #[derive(Serialize)]
@@ -1222,14 +1242,19 @@ struct NextTitle {
 
 /// Erste Spalte aller Zeilen.
 fn column<T: rusqlite::types::FromSql>(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> R<Vec<T>> {
-    let mut stmt = conn.prepare(sql).map_err(err)?;
-    let rows = stmt.query_map(p, |r| r.get(0)).map_err(err)?;
-    Ok(rows.filter_map(Result::ok).collect())
+    db::column(conn, sql, p).map_err(err)
+}
+
+/// Kurs nur, wenn ich ihn sehen darf; sonst None (dann gilt alles ohne Kurs).
+fn visible_course(conn: &Connection, who: &Who, course_id: Option<i64>) -> Option<i64> {
+    course_id.filter(|id| role(conn, who, *id).is_ok())
 }
 
 // ponytail: Tagesgrenzen in der Zeitzone des Geräts bzw. Servers. Zeitzone pro Nutzer, falls Leute aus verschiedenen Zeitzonen einen Server teilen.
-/// `course` = Kurs für Level und Titel (None: alle XP, feste Titel). Serie, Tagesziel, Kalender und Trefferquote gelten für alles.
-fn stats_of(conn: &Connection, who: &Who, course: Option<i64>) -> R<Stats> {
+/// `names.course` = Kurs für Level und Titel (None: alle XP, feste Titel). Serie, Tagesziel, Kalender, Gesamt-XP und
+/// Trefferquote gelten für alles.
+fn stats_of(conn: &Connection, who: &Who, names: &motivation::Names) -> R<Stats> {
+    let course = names.course;
     let days: Vec<i64> = column(conn, "SELECT DISTINCT CAST(julianday(date(finished_at, 'unixepoch', 'localtime')) AS INTEGER) FROM lessons WHERE user_id = ?1", [who.id])?;
     let mut frozen: Vec<i64> = column(conn, "SELECT day FROM frozen WHERE user_id = ?1", [who.id])?;
     let today: i64 = conn.query_row("SELECT CAST(julianday(date('now', 'localtime')) AS INTEGER)", [], |r| r.get(0)).map_err(err)?;
@@ -1263,7 +1288,7 @@ fn stats_of(conn: &Connection, who: &Who, course: Option<i64>) -> R<Stats> {
     let frozen_days = column(conn, "SELECT date(day + 0.5) FROM frozen WHERE user_id = ?1 AND day > ?2 ORDER BY day", params![who.id, today - 42])?;
     let (total_xp, lessons, accuracy): (i64, i64, i64) = conn
         .query_row(
-            "SELECT COALESCE(SUM(xp), 0), COUNT(*), COALESCE(SUM(correct) * 100 / NULLIF(SUM(total), 0), 0) FROM lessons WHERE user_id = ?1",
+            "SELECT COALESCE(SUM(xp), 0), COALESCE(SUM(main), 0), COALESCE(SUM(correct) * 100 / NULLIF(SUM(total), 0), 0) FROM lessons WHERE user_id = ?1",
             [who.id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -1283,7 +1308,6 @@ fn stats_of(conn: &Connection, who: &Who, course: Option<i64>) -> R<Stats> {
         .query_row("SELECT COALESCE(SUM(xp), 0) FROM lessons WHERE user_id = ?1 AND (?2 IS NULL OR course_id = ?2)", params![who.id, course], |r| r.get(0))
         .map_err(err)?;
     let (level, level_xp, level_need) = learn::level(course_xp);
-    let names = motivation::names(conn, course);
     Ok(Stats {
         streak,
         xp_today: week.last().map(|d| d.xp).unwrap_or(0),
@@ -1302,7 +1326,7 @@ fn stats_of(conn: &Connection, who: &Who, course: Option<i64>) -> R<Stats> {
         freezes: (credits - bridged.len() as i64).max(0),
         frozen_days,
         accuracy,
-        notice: (!bridged.is_empty()).then(|| motivation::pick(conn, course, "freeze", &[("streak", streak.to_string())])),
+        notice: (!bridged.is_empty()).then(|| motivation::pick(conn, names, "freeze", &[("streak", streak.to_string())])),
     })
 }
 
@@ -1322,6 +1346,9 @@ struct NextUnit {
 #[derive(Serialize)]
 struct Finished {
     xp: i64,
+    /// Erstantworten dieser Lektion, vom Server gezählt (Zuordnen-Runde als eine Aufgabe)
+    correct: i64,
+    total: i64,
     stats: Stats,
     level_up: bool,
     /// Gerade freigeschaltete Erfolge
@@ -1334,26 +1361,61 @@ struct Finished {
     cheer: String,
 }
 
-/// `best_run` = meiste richtige Antworten in Folge in dieser Lektion. `course_id` = Kurs der Lektion, wenn sie keine Einheit hat
-/// (Falsch-/Prüfungsrunde; die tägliche Wiederholung schickt den gewählten Kurs).
-// ponytail: die tägliche Wiederholung zählt für den gewählten Kurs, auch wenn Fragen aus anderen Kursen dabei sind. Aufteilen je Frage, falls das stört.
-fn finish_lesson(c: &Core, who: &Who, unit_id: Option<i64>, correct: i64, total: i64, best_run: i64, course_id: Option<i64>) -> R<Finished> {
+/// Was eine Lektion in einem Kurs gebracht hat.
+struct Part {
+    course: i64,
+    correct: i64,
+    total: i64,
+}
+
+/// Richtig/gesamt zählt der Server aus den Erstantworten seit der letzten Lektion (`lesson_answers`, dann verbraucht):
+/// nichts beantwortet → keine XP, ein zweiter Aufruf bringt nichts. `matched` = Ergebnis der Zuordnen-Runde (ohne Frage).
+/// Die XP zählen insgesamt einmal und zusätzlich im Kurs, aus dem die Frage stammt: Die tägliche Wiederholung mit Fragen
+/// aus mehreren Kursen bekommt eine Zeile je Kurs. Die Hauptzeile (Kurs der Einheit bzw. Runde, sonst der mit den meisten
+/// Antworten) trägt die Einheit und den Abschluss-Bonus und zählt als Lektion (`main`).
+/// `best_run` = meiste richtige Antworten in Folge (vom Client, auf die Aufgabenzahl begrenzt). `course_id` = Kurs der Runde ohne Einheit.
+/// `partial` = abgebrochen: XP für die richtigen Antworten, Lerntag zählt; kein Bonus, keine Lektion, keine Erfolge.
+// ponytail: Erstantworten einer abgestürzten Lektion zählen in der nächsten mit. Eine Lektions-ID, falls das stört.
+fn finish_lesson(c: &Core, who: &Who, unit_id: Option<i64>, course_id: Option<i64>, best_run: i64, matched: Option<bool>, partial: bool) -> R<Finished> {
     let conn = c.db.lock().unwrap();
-    let course = match (unit_id, course_id) {
-        (Some(id), _) => Some(unit_role(&conn, who, id)?.0),
-        (None, Some(cid)) => role(&conn, who, cid).ok().map(|_| cid),
-        _ => None,
+    let main = match unit_id {
+        Some(id) => Some(unit_role(&conn, who, id)?.0),
+        None => visible_course(&conn, who, course_id),
     };
-    // Werte kommen vom Client: auf eine echte Lektion begrenzen
-    let total = total.clamp(0, 50);
-    let correct = correct.clamp(0, total);
+    let mut parts: Vec<Part> = {
+        let mut st = conn
+            .prepare(&format!(
+                "SELECT u.course_id, SUM(a.correct), COUNT(*) FROM lesson_answers a JOIN questions q ON q.id = a.question_id
+                 JOIN units u ON u.id = q.unit_id JOIN courses c ON c.id = u.course_id
+                 WHERE a.user_id = ?1 AND {} GROUP BY u.course_id ORDER BY COUNT(*) DESC, u.course_id",
+                can_see("?1")
+            ))
+            .map_err(err)?;
+        let rows = st.query_map([who.id], |r| Ok(Part { course: r.get(0)?, correct: r.get(1)?, total: r.get(2)? })).map_err(err)?;
+        rows.collect::<Result<_, _>>().map_err(err)?
+    };
+    conn.execute("DELETE FROM lesson_answers WHERE user_id = ?1", [who.id]).map_err(err)?;
+    let main = main.or(parts.first().map(|p| p.course));
+    if let Some(m) = main {
+        match parts.iter().position(|p| p.course == m) {
+            Some(i) => parts.swap(0, i),
+            None => parts.insert(0, Part { course: m, correct: 0, total: 0 }),
+        }
+        if let Some(ok) = matched {
+            parts[0].total += 1;
+            parts[0].correct += ok as i64;
+        }
+    }
+    let correct: i64 = parts.iter().map(|p| p.correct).sum();
+    let total: i64 = parts.iter().map(|p| p.total).sum();
     let now = db::now();
-    let prev = stats_of(&conn, who, course)?;
+    let names = motivation::names(&conn, main);
+    let prev = stats_of(&conn, who, &names)?;
     let last: Option<i64> = conn.query_row("SELECT MAX(finished_at) FROM lessons WHERE user_id = ?1", [who.id], |r| r.get(0)).map_err(err)?;
     let before = match unit_id {
         Some(id) => conn
             .query_row(
-                "SELECT correct, total FROM lessons WHERE user_id = ?1 AND unit_id = ?2 AND total > 0 ORDER BY finished_at DESC, id DESC LIMIT 1",
+                "SELECT correct, total FROM lessons WHERE user_id = ?1 AND unit_id = ?2 AND main = 1 AND total > 0 ORDER BY finished_at DESC, id DESC LIMIT 1",
                 params![who.id, id],
                 |r| Ok(Attempt { correct: r.get(0)?, total: r.get(1)? }),
             )
@@ -1361,33 +1423,94 @@ fn finish_lesson(c: &Core, who: &Who, unit_id: Option<i64>, correct: i64, total:
             .map_err(err)?,
         None => None,
     };
-    let xp = learn::lesson_xp(correct, total);
-    conn.execute(
-        "INSERT INTO lessons(unit_id, xp, correct, total, finished_at, user_id, course_id) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![unit_id, xp, correct, total, now, who.id, course],
-    )
-    .map_err(err)?;
-    let mut stats = stats_of(&conn, who, course)?;
+    let xp = if total > 0 { learn::lesson_xp(correct, total, !partial) } else { 0 };
+    if total > 0 {
+        for (i, p) in parts.iter().enumerate() {
+            // Hauptzeile: ihr Anteil plus Bonus (= alles, was die anderen Kurse nicht bekommen)
+            let (unit, share, counts) = if i == 0 { (unit_id, xp - 2 * (correct - p.correct), !partial) } else { (None, 2 * p.correct, false) };
+            conn.execute(
+                "INSERT INTO lessons(unit_id, xp, correct, total, finished_at, user_id, course_id, main) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![unit, share, p.correct, p.total, now, who.id, p.course, counts],
+            )
+            .map_err(err)?;
+        }
+    }
+    let mut stats = stats_of(&conn, who, &names)?;
     stats.notice = stats.notice.or(prev.notice);
     // Je 7 Tage in Folge ein Pausentag, höchstens 2 auf Vorrat
     if stats.streak > prev.streak && stats.streak % 7 == 0 && stats.freezes < 2 {
         conn.execute("UPDATE users SET freezes = MIN(freezes + 1, 2) WHERE id = ?1", [who.id]).map_err(err)?;
         stats.freezes += 1;
     }
+    let level_up = stats.level > prev.level;
+    if partial || total == 0 {
+        return Ok(Finished { xp, correct, total, stats, level_up, badges: vec![], before, next: None, cheer: String::new() });
+    }
 
-    let comeback = prev.lessons > 0 && last.is_some_and(|l| now - l >= 3 * 86_400);
-    // Kurs-Erfolge zählen nur diesen Kurs; ohne Kurs bleiben sie aus (alles 0), Serien-Erfolge gelten immer.
-    let cid = course.unwrap_or(-1);
-    let flag = |sql: &str| -> R<bool> { conn.query_row(sql, params![who.id, cid], |r| r.get(0)).map_err(err) };
-    let (course_lessons, course_tasks): (i64, i64) = conn
-        .query_row("SELECT COUNT(*), COALESCE(SUM(total), 0) FROM lessons WHERE user_id = ?1 AND course_id = ?2", params![who.id, cid], |r| Ok((r.get(0)?, r.get(1)?)))
+    // Serien-Erfolge einmal, Kurs-Erfolge in jedem Kurs, in dem diese Lektion gezählt hat
+    let comeback = last.is_some_and(|l| now - l >= 3 * 86_400);
+    let mut badges = vec![];
+    let general = motivation::Facts { best_streak: stats.best_streak, comeback, ..Default::default() };
+    for b in motivation::earned(&general).into_iter().filter(|b| b.global) {
+        if conn.execute("INSERT OR IGNORE INTO badges(user_id, id, at) VALUES(?1, ?2, ?3)", params![who.id, b.id, now]).map_err(err)? == 1 {
+            badges.push(names.out(b, Some(now)));
+        }
+    }
+    for p in &parts {
+        let other = (Some(p.course) != names.course).then(|| motivation::names(&conn, Some(p.course)));
+        let n = other.as_ref().unwrap_or(&names);
+        let run = if Some(p.course) == main { best_run.clamp(0, total) } else { 0 };
+        for b in motivation::earned(&course_facts(&conn, who, p.course, run)?).into_iter().filter(|b| !b.global) {
+            let fresh = conn
+                .execute("INSERT OR IGNORE INTO course_badges(user_id, course_id, id, at) VALUES(?1, ?2, ?3, ?4)", params![who.id, p.course, b.id, now])
+                .map_err(err)?;
+            if fresh == 1 {
+                badges.push(n.out(b, Some(now)));
+            }
+        }
+    }
+
+    let pct = |a: &Attempt| a.correct * 100 / a.total.max(1);
+    let acc = pct(&Attempt { correct, total });
+    let improved = match (unit_id, &before) {
+        (Some(id), Some(b)) if acc > pct(b) => conn.query_row("SELECT title FROM units WHERE id = ?1", [id], |r| r.get(0)).ok(),
+        _ => None,
+    };
+    let cheer = motivation::cheer_for(
+        &conn,
+        &names,
+        &motivation::Moment {
+            level_up: level_up.then(|| (stats.level, stats.title.clone())),
+            badge: badges.first().map(|b| b.title.clone()),
+            record: (stats.best_streak > prev.best_streak && stats.best_streak >= 3).then_some(stats.best_streak),
+            comeback,
+            improved,
+            perfect: correct >= total,
+            acc,
+        },
+    );
+    let next = match main {
+        Some(cid) => recommend(&conn, who, cid, unit_id)?,
+        None => None,
+    };
+    Ok(Finished { xp, correct, total, stats, level_up, badges, before, next, cheer })
+}
+
+/// Was der Code für die Kurs-Erfolge über einen Kurs weiß (Serien-Erfolge kommen getrennt). `best_run` = aus dieser Lektion.
+fn course_facts(conn: &Connection, who: &Who, course: i64, best_run: i64) -> R<motivation::Facts> {
+    let flag = |sql: &str| -> R<bool> { conn.query_row(sql, params![who.id, course], |r| r.get(0)).map_err(err) };
+    let (lessons, tasks, xp): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(main), 0), COALESCE(SUM(total), 0), COALESCE(SUM(xp), 0) FROM lessons WHERE user_id = ?1 AND course_id = ?2",
+            params![who.id, course],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .map_err(err)?;
-    let facts = motivation::Facts {
-        lessons: course_lessons,
-        tasks: course_tasks,
-        perfect: flag("SELECT EXISTS(SELECT 1 FROM lessons WHERE user_id = ?1 AND course_id = ?2 AND total >= 5 AND correct >= total)")?,
-        best_run: if course.is_some() { best_run.clamp(0, total) } else { 0 },
-        best_streak: stats.best_streak,
+    Ok(motivation::Facts {
+        lessons,
+        tasks,
+        perfect: flag("SELECT EXISTS(SELECT 1 FROM lessons WHERE user_id = ?1 AND course_id = ?2 AND main = 1 AND total >= 5 AND correct >= total)")?,
+        best_run,
         // Lernstand wie im Pfad: Ø Box der sichtbaren Fragen einer Einheit dieses Kurses
         mastered: flag(
             "SELECT EXISTS(SELECT 1 FROM questions q JOIN units u ON u.id = q.unit_id LEFT JOIN progress p ON p.question_id = q.id AND p.user_id = ?1
@@ -1405,47 +1528,9 @@ fn finish_lesson(c: &Core, who: &Who, unit_id: Option<i64>, correct: i64, total:
                                         WHERE q.unit_id = u.id AND COALESCE(p.hidden, 0) = 0)) >= 4
              FROM units u WHERE u.course_id = ?2 AND COALESCE(u.exam, '[]') != '[]'",
         )?,
-        level: if course.is_some() { stats.level } else { 0 },
-        comeback,
-    };
-    let names = motivation::names(&conn, course);
-    let mut badges = vec![];
-    for b in motivation::earned(&facts) {
-        let fresh = if b.global {
-            conn.execute("INSERT OR IGNORE INTO badges(user_id, id, at) VALUES(?1, ?2, ?3)", params![who.id, b.id, now])
-        } else {
-            conn.execute("INSERT OR IGNORE INTO course_badges(user_id, course_id, id, at) VALUES(?1, ?2, ?3, ?4)", params![who.id, cid, b.id, now])
-        };
-        if fresh.map_err(err)? == 1 {
-            badges.push(names.out(b, Some(now)));
-        }
-    }
-
-    let pct = |a: &Attempt| a.correct * 100 / a.total.max(1);
-    let acc = pct(&Attempt { correct, total });
-    let improved = match (unit_id, &before) {
-        (Some(id), Some(b)) if acc > pct(b) => conn.query_row("SELECT title FROM units WHERE id = ?1", [id], |r| r.get(0)).ok(),
-        _ => None,
-    };
-    let level_up = stats.level > prev.level;
-    let cheer = motivation::cheer_for(
-        &conn,
-        course,
-        &motivation::Moment {
-            level_up: level_up.then(|| (stats.level, stats.title.clone())),
-            badge: badges.first().map(|b| b.title.clone()),
-            record: (stats.best_streak > prev.best_streak && stats.best_streak >= 3).then_some(stats.best_streak),
-            comeback,
-            improved,
-            perfect: total > 0 && correct >= total,
-            acc,
-        },
-    );
-    let next = match course {
-        Some(cid) => recommend(&conn, who, cid, unit_id)?,
-        None => None,
-    };
-    Ok(Finished { xp, stats, level_up, badges, before, next, cheer })
+        level: learn::level(xp).0,
+        ..Default::default()
+    })
 }
 
 /// Nächste Lektion: erst die nächste noch nie geübte Einheit (wie „Start“ im Lernpfad),
@@ -1606,6 +1691,7 @@ fn checked(conn: &Connection, unit_id: i64, kind: String, i: QuestionIn) -> R<(i
 fn update_question(c: &Core, who: &Who, question_id: i64, mut i: QuestionIn) -> R<QuestionOut> {
     let conn = c.db.lock().unwrap();
     question_role(&conn, who, question_id)?;
+    question_in_battle(&conn, question_id)?;
     let (unit_id, kind, figure): (i64, String, Option<i64>) =
         conn.query_row("SELECT unit_id, kind, figure_id FROM questions WHERE id = ?1", [question_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(err)?;
     i.figure_id = i.figure_id.or(figure);
@@ -1680,7 +1766,8 @@ fn battle_pool(conn: &Connection, course_id: i64, u1: i64, u2: i64) -> R<Vec<(i6
 }
 
 /// Ein Battle samt Punkten beider Seiten in einer Abfrage. Einzelne Battles und die Bestenliste lesen es gleich.
-const BATTLE_SQL: &str = "SELECT b.id, b.a_id, b.b_id, b.a_course, b.b_course, b.a_qs, b.b_qs, b.created_at, b.started_ms, b.gave_up,
+// Kurs 0 = gelöscht (NULL): kein Kursname, kein Beitritt; das Ergebnis zählt weiter.
+const BATTLE_SQL: &str = "SELECT b.id, b.a_id, b.b_id, COALESCE(b.a_course, 0), b.b_course, b.a_qs, b.b_qs, b.created_at, b.started_ms, b.gave_up,
    (SELECT COUNT(*) FROM battle_answers x WHERE x.battle_id = b.id AND x.user_id = b.a_id),
    (SELECT COALESCE(SUM(correct), 0) FROM battle_answers x WHERE x.battle_id = b.id AND x.user_id = b.a_id),
    (SELECT COALESCE(MAX(ms), 0) FROM battle_answers x WHERE x.battle_id = b.id AND x.user_id = b.a_id),
@@ -1897,7 +1984,7 @@ fn battle_answer(c: &Core, who: &Who, id: i64, idx: usize, given: &str) -> R<Ans
         return Err("Beantworte zuerst die Aufgabe davor.".into());
     }
     // Die Frage hat der Server zugeteilt: keine neue Kursprüfung, sonst sperrt ein Kurs-Austritt mitten im Battle jede Antwort.
-    let (out, _) = grade_question(&conn, who, question_id, given)?;
+    let (out, _, _) = grade_question(&conn, who, question_id, given)?;
     // Schon gespeichert (Antwort kam nicht an, die Oberfläche schickt erneut) → nur das Ergebnis, die erste Antwort zählt.
     if idx < mine.answered {
         return Ok(out);
@@ -1923,6 +2010,23 @@ fn battle_leave(c: &Core, who: &Who, id: i64, give_up: bool) -> R<bool> {
         return Ok(false);
     }
     Ok(conn.execute("UPDATE battles SET gave_up = ?2 WHERE id = ?1 AND gave_up IS NULL", params![id, who.id]).map_err(err)? > 0)
+}
+
+/// Läuft gerade ein Battle mit dieser Frage? Dann bleibt sie, wie sie ist: das Battle bewertet mit ihrem aktuellen Stand,
+/// sonst könnte auch der Kursbesitzer eine laufende Runde kippen.
+fn question_in_battle(conn: &Connection, question_id: i64) -> R<()> {
+    let busy: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM battles b WHERE b.b_id IS NOT NULL AND b.gave_up IS NULL AND b.started_ms > ?2
+               AND (?1 IN (SELECT value FROM json_each(b.a_qs)) OR ?1 IN (SELECT value FROM json_each(b.b_qs))))",
+            params![question_id, now_ms() - BATTLE_MS],
+            |r| r.get(0),
+        )
+        .map_err(err)?;
+    if busy {
+        return Err("Die Frage läuft gerade in einem Battle. Versuch es in ein paar Minuten noch einmal.".into());
+    }
+    Ok(())
 }
 
 /// Läuft ein Battle, in dem ich noch Aufgaben offen habe? Dann keine Lösungen über die normalen Befehle.
@@ -2070,6 +2174,15 @@ mod tests {
         )
         .unwrap();
         (10, 30, 40, 41)
+    }
+
+    /// Erstantworten wie über `answer` (ohne Box): `right` richtige und `wrong` falsche, neu angelegte Fragen der Einheit.
+    fn answered(c: &Core, unit: i64, right: i64, wrong: i64) {
+        let conn = c.db.lock().unwrap();
+        for i in 0..right + wrong {
+            conn.execute("INSERT INTO questions(unit_id, kind, prompt, options, answer) VALUES(?1, 'mc', 'Frage?', '[]', 'a')", [unit]).unwrap();
+            conn.execute("INSERT INTO lesson_answers(user_id, question_id, correct) VALUES(1, ?1, ?2)", params![conn.last_insert_rowid(), i < right]).unwrap();
+        }
     }
 
     const U2: Who = Who { id: 2, admin: false };
@@ -2379,8 +2492,9 @@ mod tests {
         answer("Richtig", false);
         assert_eq!((wrong(), round()), (0, vec![]));
         let (b, due): (i64, i64) = c.db.lock().unwrap().query_row("SELECT box, due_at FROM progress WHERE question_id = ?1", [q], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(b, 2);
-        assert!(due - db::now() > 2 * 86_400); // erst in ein paar Tagen wieder fällig
+        // Am selben Tag noch nicht wieder fällig: raus aus der Falsch-Liste, die Box steigt erst, wenn die Frage dran ist
+        assert_eq!(b, 1);
+        assert!(due > db::now());
     }
 
     #[test]
@@ -2555,6 +2669,11 @@ mod tests {
         // Während des Battles keine Lösung über die normalen Befehle
         assert_eq!(run(&c, &me, "answer", json!({ "questionId": 40, "given": "x", "retry": true })).unwrap_err(), IN_BATTLE);
         assert_eq!(run(&c, &me, "unit_questions", json!({ "unitId": 30 })).unwrap_err(), IN_BATTLE);
+        // … und keine Änderungen an Fragen: nicht von Beteiligten, und auch der Kursbesitzer kippt keine laufende Runde
+        let busy = mine[0]["id"].as_i64().unwrap();
+        assert_eq!(run(&c, &me, "delete_question", json!({ "questionId": busy })).unwrap_err(), IN_BATTLE);
+        assert!(question_in_battle(&c.db.lock().unwrap(), busy).is_err());
+        assert!(question_in_battle(&c.db.lock().unwrap(), 9999).is_ok());
         for i in 0..3 {
             run(&c, &me, "battle_answer", json!({ "battleId": id, "idx": i, "given": "falsch" })).unwrap();
             // Erneut geschickt (Antwort ging verloren): gleiche Rückmeldung, die erste Antwort bleibt
@@ -2649,7 +2768,10 @@ mod tests {
         c.db.lock().unwrap()
             .execute_batch("INSERT INTO units(id, course_id, document_id, idx, page_from, page_to, title, source_text, status) VALUES(31, 10, 20, 1, 4, 6, 'Angebot', 'Text', 'ready');")
             .unwrap();
-        let fin = |correct: i64| run(&c, &crate::LOCAL, "finish_lesson", json!({ "unitId": unit, "correct": correct, "total": 4, "bestRun": correct })).unwrap();
+        let fin = |correct: i64| {
+            answered(&c, unit, correct, 4 - correct);
+            run(&c, &crate::LOCAL, "finish_lesson", json!({ "unitId": unit, "bestRun": correct })).unwrap()
+        };
         let first = fin(2);
         let badges: Vec<&str> = first["badges"].as_array().unwrap().iter().map(|b| b["id"].as_str().unwrap()).collect();
         assert_eq!(badges, vec!["first"]);
@@ -2662,8 +2784,12 @@ mod tests {
         assert_eq!(second["before"], json!({ "correct": 2, "total": 4 }));
         // besser als beim letzten Mal → der Code wählt den Anlass „improved“ (fester Text, die KI fehlt im Test)
         assert_eq!(second["cheer"], "Besser als beim letzten Mal in „Nachfrage“. Das ist echter Fortschritt.");
-        // Wiederholung ohne Einheit: Empfehlung aus dem mitgeschickten Kurs
-        let review = run(&c, &crate::LOCAL, "finish_lesson", json!({ "correct": 1, "total": 1, "courseId": course })).unwrap();
+        // Noch einmal abschließen, ohne etwas beantwortet zu haben: keine XP
+        let again = run(&c, &crate::LOCAL, "finish_lesson", json!({ "unitId": unit })).unwrap();
+        assert_eq!((again["xp"].as_i64(), again["total"].as_i64()), (Some(0), Some(0)));
+        // Wiederholung ohne Einheit: Empfehlung aus dem Kurs der Antworten
+        answered(&c, unit, 1, 0);
+        let review = run(&c, &crate::LOCAL, "finish_lesson", json!({})).unwrap();
         assert_eq!(review["next"]["unit_id"], 31);
         let all = run(&c, &crate::LOCAL, "badges", json!({ "courseId": course })).unwrap();
         assert_eq!(all.as_array().unwrap().len(), motivation::BADGES.len());
@@ -2687,7 +2813,8 @@ mod tests {
                  UPDATE courses SET motivation = '{names}' WHERE id = 10;"
             ))
             .unwrap();
-        let fin = run(&c, &crate::LOCAL, "finish_lesson", json!({ "unitId": unit, "correct": 50, "total": 50, "bestRun": 50 })).unwrap();
+        answered(&c, unit, 50, 0);
+        let fin = run(&c, &crate::LOCAL, "finish_lesson", json!({ "unitId": unit, "bestRun": 50 })).unwrap();
         // 110 XP im Kurs Mikro: Level 3 mit dem KI-Titel, Erfolg mit dem KI-Namen
         assert_eq!((fin["stats"]["level"].as_i64(), fin["stats"]["title"].as_str()), (Some(3), Some("Mikro-Starter")));
         assert_eq!(fin["stats"]["next_title"], json!({ "level": 11, "title": "Mikro-Gott" }));
@@ -2699,10 +2826,10 @@ mod tests {
         assert_eq!((other["level"].as_i64(), other["title"].as_str()), (Some(1), Some("Recht · Erste Schritte")));
         let mine = run(&c, &crate::LOCAL, "stats", json!({ "courseId": course })).unwrap();
         assert_eq!(mine["level"], 3);
-        // Prüfungsrunde ohne Einheit zählt in der Kurs-Bestenliste
-        run(&c, &crate::LOCAL, "finish_lesson", json!({ "correct": 1, "total": 1, "courseId": 11 })).unwrap();
+        // Runde ohne Einheit (nur die Zuordnen-Runde) zählt in der Kurs-Bestenliste
+        run(&c, &crate::LOCAL, "finish_lesson", json!({ "matched": true, "courseId": 11 })).unwrap();
         let board = run(&c, &crate::LOCAL, "leaderboard", json!({ "courseId": 11 })).unwrap();
-        assert_eq!(board[0]["xp"], learn::lesson_xp(1, 1));
+        assert_eq!(board[0]["xp"], learn::lesson_xp(1, 1, true));
     }
 
     #[test]
@@ -2717,7 +2844,8 @@ mod tests {
                 conn.execute("INSERT INTO lessons(unit_id, xp, correct, total, finished_at, user_id, course_id) VALUES(30, 10, 1, 1, ?1, 1, 10)", [db::now() - d * 86_400]).unwrap();
             }
         }
-        let fin = run(&c, &crate::LOCAL, "finish_lesson", json!({ "unitId": unit, "correct": 1, "total": 1 })).unwrap();
+        answered(&c, unit, 1, 0);
+        let fin = run(&c, &crate::LOCAL, "finish_lesson", json!({ "unitId": unit })).unwrap();
         let week = fin["badges"].as_array().unwrap().iter().find(|b| b["id"] == "week").unwrap();
         assert_eq!((week["title"].as_str(), week["global"].as_bool()), (Some("Eine Woche"), Some(true)));
         let conn = c.db.lock().unwrap();
@@ -2750,6 +2878,8 @@ mod tests {
         assert_eq!(state(&c), (true, 1, 1));
         run(&c, &crate::LOCAL, "update_course", json!({ "id": course, "name": "Makro" })).unwrap();
         assert_eq!(state(&c), (false, 0, 0));
+        // Im Kurs wird gelernt → die KI schreibt die Namen für den neuen Namen
+        c.db.lock().unwrap().execute("INSERT INTO lessons(unit_id, xp, correct, total, finished_at, course_id) VALUES(30, 10, 1, 1, ?1, 10)", [db::now()]).unwrap();
         assert_eq!(motivation::wanted_names(&c.db.lock().unwrap()), Some(10));
     }
 
@@ -2775,5 +2905,78 @@ mod tests {
         c2.db.lock().unwrap().execute("INSERT INTO lessons(unit_id, xp, correct, total, finished_at, user_id) VALUES(NULL, 10, 1, 1, ?1, 1)", [db::now() - 2 * 86_400]).unwrap();
         let s2 = run(&c2, &crate::LOCAL, "stats", json!({})).unwrap();
         assert_eq!((s2["streak"].as_i64(), s2["notice"].is_null()), (Some(0), true));
+    }
+
+    #[test]
+    fn review_xp_counts_once_and_in_each_course() {
+        use serde_json::json;
+        let dir = tmp("review-split");
+        let c = core(&dir);
+        let (course, unit, _, _) = seed(&c);
+        c.db.lock().unwrap()
+            .execute_batch(
+                "INSERT INTO courses(id, name, created_at, owner_id) VALUES(11, 'Recht', 0, 1);
+                 INSERT INTO documents(id, course_id, name, pages, created_at) VALUES(21, 11, 'r.pdf', 1, 0);
+                 INSERT INTO units(id, course_id, document_id, idx, page_from, page_to, title, source_text, status) VALUES(35, 11, 21, 0, 1, 1, 'Vertrag', 'Text', 'ready');",
+            )
+            .unwrap();
+        // Tägliche Wiederholung: 3 von 4 aus Mikro, 1 von 1 aus Recht
+        answered(&c, unit, 3, 1);
+        answered(&c, 35, 1, 0);
+        let fin = run(&c, &crate::LOCAL, "finish_lesson", json!({ "bestRun": 3 })).unwrap();
+        // Insgesamt einmal: 2 × 4 richtige + 5 fürs Abschließen, eine Lektion
+        assert_eq!((fin["xp"].as_i64(), fin["correct"].as_i64(), fin["total"].as_i64()), (Some(13), Some(4), Some(5)));
+        assert_eq!((fin["stats"]["total_xp"].as_i64(), fin["stats"]["lessons"].as_i64()), (Some(13), Some(1)));
+        // Im Kurs: Mikro (Hauptkurs, meiste Antworten) 3 × 2 + 5, Recht 1 × 2
+        let level_xp = |id: i64| run(&c, &crate::LOCAL, "stats", json!({ "courseId": id })).unwrap()["level_xp"].as_i64().unwrap();
+        assert_eq!((level_xp(course), level_xp(11)), (11, 2));
+        let board = |id: Option<i64>| run(&c, &crate::LOCAL, "leaderboard", json!({ "courseId": id })).unwrap()[0]["xp"].as_i64().unwrap();
+        assert_eq!((board(None), board(Some(course)), board(Some(11))), (13, 11, 2));
+        // Antworten sind verbraucht: ein zweiter Aufruf bringt nichts
+        let again = run(&c, &crate::LOCAL, "finish_lesson", json!({})).unwrap();
+        assert_eq!(again["xp"], 0);
+        // Abgebrochen: nur die richtigen Antworten, keine Lektion, keine Erfolge
+        answered(&c, unit, 2, 0);
+        let part = run(&c, &crate::LOCAL, "finish_lesson", json!({ "unitId": unit, "partial": true })).unwrap();
+        assert_eq!((part["xp"].as_i64(), part["stats"]["lessons"].as_i64(), part["badges"].as_array().map(Vec::len)), (Some(4), Some(1), Some(0)));
+        assert_eq!(part["stats"]["total_xp"], 17);
+    }
+
+    #[test]
+    fn box_rises_only_when_due() {
+        use serde_json::json;
+        let dir = tmp("due-box");
+        let c = core(&dir);
+        let (_, _, q, _) = seed(&c);
+        let ans = |given: &str| run(&c, &crate::LOCAL, "answer", json!({ "questionId": q, "given": given, "retry": false })).unwrap();
+        let state = || -> (i64, bool) {
+            c.db.lock().unwrap().query_row("SELECT box, wrong FROM progress WHERE user_id = 1 AND question_id = ?1", [q], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+        };
+        ans("Richtig");
+        assert_eq!(state(), (1, false));
+        // Am selben Abend noch einmal richtig: noch nicht fällig, die Box bleibt
+        ans("Richtig");
+        assert_eq!(state(), (1, false));
+        // Fällig: steigt
+        c.db.lock().unwrap().execute("UPDATE progress SET due_at = 0 WHERE question_id = ?1", [q]).unwrap();
+        ans("Richtig");
+        assert_eq!(state(), (2, false));
+        // Falsch: zurück auf 1, auch wenn nicht fällig
+        ans("Falsch");
+        assert_eq!(state(), (1, true));
+        // Richtig, aber nicht fällig: Box bleibt, raus aus der Falsch-Liste
+        ans("Richtig");
+        assert_eq!(state(), (1, false));
+        let counted: i64 = c.db.lock().unwrap().query_row("SELECT COUNT(*) FROM lesson_answers WHERE user_id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(counted, 1, "eine Erstantwort je Frage und Lektion");
+    }
+
+    #[test]
+    fn unit_shows_source_text() {
+        use serde_json::json;
+        let dir = tmp("unit-text");
+        let c = core(&dir);
+        let (_, unit, _, _) = seed(&c);
+        assert_eq!(run(&c, &crate::LOCAL, "unit", json!({ "unitId": unit })).unwrap()["text"], "Text");
     }
 }

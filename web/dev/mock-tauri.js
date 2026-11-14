@@ -14,8 +14,11 @@ const TIERS = [
   { id: "kompakt", label: "Kompakt (Qwen3.5 2B, 1,3 GB)", size: 1280835840 },
   { id: "ausgewogen", label: "Ausgewogen (Qwen3.5 4B, 2,7 GB)", size: 2740937888 },
 ];
-let ai = { state: q.get("ai") === "ready" ? "ready" : "downloading", done: 0, total: TIERS[1].size, tier: "ausgewogen", label: TIERS[1].label, loaded: false };
-if (ai.state !== "ready") {
+// ?ai=ready: KI da, ?ai=missing: noch nicht geladen (die App fragt erst), sonst: lädt gerade
+const aiStart = q.get("ai") === "ready" ? "ready" : q.get("ai") === "missing" ? "missing" : "downloading";
+let ai = { state: aiStart, done: 0, total: TIERS[1].size, size: TIERS[1].size, tier: "ausgewogen", label: TIERS[1].label, loaded: false };
+function download() {
+  ai = { ...ai, state: "downloading", done: 0 };
   const t = setInterval(() => {
     ai.done = Math.min(ai.total, ai.done + ai.total / 14);
     if (ai.done >= ai.total) {
@@ -25,6 +28,7 @@ if (ai.state !== "ready") {
     fire("ai-status", { ...ai });
   }, 450);
 }
+if (ai.state === "downloading") download();
 
 /** SWOT-Grafik wie aus einer Folie: Feldtitel übermalt, die Stichpunkte bleiben stehen. */
 function swotImage() {
@@ -176,7 +180,8 @@ function level(xp) {
   }
 }
 // Titel und Erfolgsnamen pro Kurs: im Kern schreibt sie die KI passend zum Kursnamen, im Mock stehen Beispiele mit {course}.
-const STAGES = ["Starter", "Entdecker", "Durchblick", "Kenner", "Profi", "Stratege", "Meister", "Champion", "Legende", "Gott"];
+// Wie die KI sie jetzt schreibt: Stufen, die man im Fach durchläuft (hier VWL), nicht „{Kurs}-Irgendwas“
+const STAGES = ["Erstsemester", "Tutor", "Werkstudent", "Junior-Analyst", "Analyst", "Ökonom", "Senior-Ökonom", "Chefvolkswirt", "Wirtschaftsweiser", "Nobelpreis-Anwärter"];
 const BADGES = [
   { id: "first", title: "Los geht's", ai: "Erste {course}-Schritte", desc: "Schließe deine erste Lektion in diesem Kurs ab.", icon: "star-fill", global: false },
   { id: "ten", title: "Dranbleiben", ai: "{course}-Dauerbrenner", desc: "Schließe 10 Lektionen in diesem Kurs ab.", icon: "cards", global: false },
@@ -200,7 +205,7 @@ const badgeOut = (b, courseId) => ({
 function courseLevel(courseId) {
   const [lvl, inLevel, need] = level(db.lessons.filter((l) => courseId == null || courseOf(l) === courseId).reduce((a, l) => a + l.xp, 0));
   const name = courseName(courseId);
-  const titleAt = (n) => (name ? `${name}-${STAGES[Math.min(9, Math.floor((n - 1) / 10))]}` : TITLES[Math.min(9, Math.floor((n - 1) / 10))]);
+  const titleAt = (n) => (name ? STAGES : TITLES)[Math.min(9, Math.floor((n - 1) / 10))];
   const next = (Math.floor((lvl - 1) / 10) + 1) * 10 + 1;
   return { level: lvl, level_xp: inLevel, level_need: need, title: titleAt(lvl), next_title: next <= 91 ? { level: next, title: titleAt(next) } : null };
 }
@@ -212,7 +217,7 @@ function stats(courseId = null) {
     xp_today: week[6].xp,
     goal: db.goal,
     total_xp: db.lessons.reduce((a, l) => a + l.xp, 0),
-    lessons: db.lessons.length,
+    lessons: db.lessons.filter((l) => l.main !== false).length,
     due: visible().filter((x) => x.box > 0 && x.due_at <= now()).length,
     week,
     active_days: [...new Set(db.lessons.map((l) => new Date(l.at * 1000).toLocaleDateString("sv-SE")))],
@@ -310,10 +315,10 @@ let mockBattle = null;
 const handlers = {
   ai_status: () => ({ ...ai }),
   ai_tiers: () => TIERS,
-  ai_retry: () => null,
+  ai_retry: () => (ai.state === "ready" || ai.state === "downloading" ? null : download()),
   ai_set_tier: ({ tier }) => {
     const t = TIERS.find((x) => x.id === tier);
-    ai = { ...ai, tier, label: t.label, total: t.size };
+    ai = { ...ai, tier, label: t.label, total: t.size, size: t.size };
     fire("ai-status", { ...ai });
   },
   courses: () =>
@@ -415,7 +420,8 @@ const handlers = {
       }),
   unit: ({ unitId }) => {
     const u = db.units.find((x) => x.id === unitId);
-    return { ...u, orga: u.orga ?? 0, exam: u.exam ?? [], document: db.documents.find((d) => d.id === u.document_id).name, explanation: u.explanation ?? null, terms: db.terms.filter((t) => t.unit_id === unitId).map((t) => ({ ...t, unit_title: u.title })) };
+    const text = `${u.title}\n\n${u.summary}\n\nAuf diesen Folien steht der ausführliche Stoff zum Thema, so wie er im Skript steht. Hier kannst du nachlesen, was die KI zusammengefasst hat.`;
+    return { ...u, text, orga: u.orga ?? 0, exam: u.exam ?? [], document: db.documents.find((d) => d.id === u.document_id).name, explanation: u.explanation ?? null, terms: db.terms.filter((t) => t.unit_id === unitId).map((t) => ({ ...t, unit_title: u.title })) };
   },
   search_terms: ({ query }) => db.terms.filter((t) => (t.term + t.definition).toLowerCase().includes(query.toLowerCase())).map((t) => ({ ...t, unit_title: db.units.find((u) => u.id === t.unit_id).title })),
   explain: async ({ unitId, onToken }) => {
@@ -447,8 +453,12 @@ const handlers = {
     const { correct, solution = null } = ["sort", "order", "cloze", "label"].includes(x.kind) ? grade(x, given) : { correct: norm(given) === norm(x.answer) };
     if (!retry) {
       x.wrong = !correct;
-      x.box = correct ? Math.min(5, x.box + 1) : 1;
-      x.due_at = now() + [0, 1, 3, 7, 14, 30][x.box] * DAY;
+      // wie im Kern: richtig, aber noch nicht fällig → Box und Termin bleiben
+      if (!(correct && x.box > 0 && x.due_at > now())) {
+        x.box = correct ? Math.min(5, x.box + 1) : 1;
+        x.due_at = now() + [0, 1, 3, 7, 14, 30][x.box] * DAY;
+      }
+      db.answered = (db.answered || []).filter((a) => a.id !== questionId).concat({ id: questionId, correct });
     }
     return { correct, expected: x.answer, why: x.why, solution };
   },
@@ -484,13 +494,19 @@ const handlers = {
     { name: "Lea", me: false, xp: 75, battles: 0, wins: 0 },
   ],
   stats: ({ courseId = null } = {}) => stats(courseId),
-  finish_lesson: ({ unitId, correct, total, bestRun = 0, courseId = null }) => {
-    const course = db.units.find((u) => u.id === unitId)?.course_id ?? courseId;
-    const before = [...db.lessons].reverse().find((l) => unitId != null && l.unit_id === unitId && l.total);
+  // Wie im Kern: richtig/gesamt aus den Erstantworten (verbraucht), Zuordnen-Runde vom Client. Mock: alles im Hauptkurs.
+  finish_lesson: ({ unitId, bestRun = 0, courseId = null, matched = null, partial = false }) => {
+    const answered = db.answered || [];
+    db.answered = [];
+    const course = db.units.find((u) => u.id === unitId)?.course_id ?? courseId ?? db.units.find((u) => u.id === db.questions.find((x) => x.id === answered[0]?.id)?.unit_id)?.course_id ?? null;
+    const correct = answered.filter((a) => a.correct).length + (matched === true ? 1 : 0);
+    const total = answered.length + (matched == null ? 0 : 1);
+    const before = [...db.lessons].reverse().find((l) => unitId != null && l.unit_id === unitId && l.total && l.main !== false);
     const was = stats(course);
-    const xp = 2 * correct + 5 + (total > 0 && correct >= total ? 5 : 0);
-    db.lessons.push({ unit_id: unitId, course_id: course, xp, correct, total, at: now() });
+    const xp = !total ? 0 : 2 * correct + (partial ? 0 : 5 + (correct >= total ? 5 : 0));
+    if (total) db.lessons.push({ unit_id: unitId, course_id: course, xp, correct, total, at: now(), main: !partial });
     const s = stats(course);
+    if (partial || !total) return { xp, correct, total, stats: s, level_up: s.level > was.level, badges: [], before: null, next: null, cheer: "" };
     // Mock: „Im Fluss“ schon ab 3 in Folge, damit man die Erfolgs-Chips sieht
     const won = BADGES.filter((b) => course != null && !b.global && !db.badges[badgeKey(b, course)] && ((b.id === "perfect" && total >= 5 && correct >= total) || (b.id === "run10" && bestRun >= 3)));
     won.forEach((b) => (db.badges[badgeKey(b, course)] = now()));
@@ -509,7 +525,7 @@ const handlers = {
             : acc < 50
               ? "Drangeblieben, obwohl es schwer war. Genau so lernt man."
               : "Lektion geschafft. Gut gemacht!";
-    return { xp, stats: s, level_up, badges: fresh, before: before ? { correct: before.correct, total: before.total } : null, next: next ? { unit_id: next.id, title: next.title, why: "Als Nächstes im Lernpfad" } : null, cheer };
+    return { xp, correct, total, stats: s, level_up, badges: fresh, before: before ? { correct: before.correct, total: before.total } : null, next: next ? { unit_id: next.id, title: next.title, why: "Als Nächstes im Lernpfad" } : null, cheer };
   },
   badges: ({ courseId = null } = {}) => BADGES.filter((b) => b.global || courseId != null).map((b) => badgeOut(b, courseId)),
   set_goal: ({ xp }) => (db.goal = xp),

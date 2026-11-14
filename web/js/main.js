@@ -49,7 +49,8 @@ async function boot() {
   if (state.session.mode === "server" && !state.session.user) return auth.show(state.session);
   addEventListener("lernpfad:logged-out", () => location.reload());
 
-  [state.ai] = await Promise.all([call("ai_status"), loadCourses(), loadStats(), appInfo()]);
+  // Erst die Kurse, dann die Statistik: Level und Titel gelten für den gewählten Kurs
+  [state.ai] = await Promise.all([call("ai_status"), loadCourses().then(loadStats), appInfo()]);
   syncReminder(state.stats);
 
   topbar = h("header.topbar");
@@ -119,6 +120,11 @@ function renderTopbar() {
     courseEl = h("span.mark-brand", icon("path"), "Lernpfad"); // ein Kurs: Name steht schon als Überschrift
   }
   const p = Math.min(1, s.xp_today / Math.max(1, s.goal));
+  // Fällige Fragen als Zahl am Tab „Wiederholen“
+  const reviewTab = tabs.querySelector('[data-tab="review"]');
+  if (s.due > 0) reviewTab.dataset.due = s.due > 99 ? "99+" : String(s.due);
+  else delete reviewTab.dataset.due;
+  reviewTab.setAttribute("aria-label", s.due > 0 ? `Wiederholen, ${s.due} fällig` : "Wiederholen");
   topbar.replaceChildren(
     courseEl,
     h("span.spacer"),

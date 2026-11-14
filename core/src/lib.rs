@@ -29,8 +29,9 @@ pub struct Core {
 }
 
 impl Core {
-    /// Öffnet `dir/lernen.db`, prüft das Modell (lädt es bei Bedarf herunter) und startet den Hintergrund-Worker.
-    pub fn open(dir: &Path, on_ai: impl Fn(&ai::Status) + Send + Sync + 'static, on_course: impl Fn(i64) + Send + 'static) -> Result<Self, String> {
+    /// Öffnet `dir/lernen.db`, prüft das Modell und startet den Hintergrund-Worker.
+    /// `download` = fehlendes Modell gleich laden (Server). Die App fragt vorher (1–3 GB, evtl. mobile Daten).
+    pub fn open(dir: &Path, download: bool, on_ai: impl Fn(&ai::Status) + Send + Sync + 'static, on_course: impl Fn(i64) + Send + 'static) -> Result<Self, String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let conn = db::open(&dir.join("lernen.db")).map_err(|e| e.to_string())?;
         let tier = db::setting(&conn, "tier").unwrap_or_else(|| ai::default_tier().into());
@@ -47,7 +48,11 @@ impl Core {
                 }
             }),
         );
-        ai.ensure_model();
+        if download {
+            ai.ensure_model();
+        } else {
+            ai.check();
+        }
         import::spawn_worker(db.clone(), ai.clone(), wake_rx, on_course);
         Ok(Core { db, ai, wake })
     }

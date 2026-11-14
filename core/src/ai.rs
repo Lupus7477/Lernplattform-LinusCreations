@@ -79,6 +79,8 @@ pub struct Status {
     pub state: State,
     pub tier: &'static str,
     pub label: &'static str,
+    /// Größe des Modells in Bytes (für „KI herunterladen (1,3 GB)“)
+    pub size: u64,
     pub loaded: bool,
 }
 
@@ -170,6 +172,7 @@ impl Ai {
             state: self.state.lock().unwrap().clone(),
             tier: t.id,
             label: t.label,
+            size: t.size,
             loaded: self.model.try_lock().map(|m| m.is_some()).unwrap_or(true),
         }
     }
@@ -179,10 +182,24 @@ impl Ai {
         (self.emit)(&self.status());
     }
 
-    /// Bei jedem Start (und nach Stufenwechsel) aufrufen: Modell vorhanden? Sonst herunterladen.
+    /// Modell der Stufe vollständig vorhanden?
+    fn present(&self, t: &Tier) -> bool {
+        fs::metadata(self.path(t)).map(|m| m.len() == t.size).unwrap_or(false)
+    }
+
+    /// Nur nachsehen, nichts laden: vorhanden → bereit, sonst „fehlt“ (die App fragt, bevor sie 1–3 GB lädt).
+    pub fn check(&self) {
+        let t = *self.tier.lock().unwrap();
+        if *self.downloading.lock().unwrap() {
+            return;
+        }
+        self.set_state(if self.present(t) { State::Ready } else { State::Missing });
+    }
+
+    /// Modell vorhanden? Sonst herunterladen. Server: bei jedem Start; App: erst, wenn man es antippt (`ai_retry`).
     pub fn ensure_model(self: &Arc<Self>) {
         let t = *self.tier.lock().unwrap();
-        if fs::metadata(self.path(t)).map(|m| m.len() == t.size).unwrap_or(false) {
+        if self.present(t) {
             self.set_state(State::Ready);
             return;
         }
@@ -251,7 +268,13 @@ impl Ai {
         if have != t.size {
             return Err(format!("unvollständig ({have} von {} Bytes)", t.size));
         }
-        fs::rename(&part, self.path(t)).map_err(|e| e.to_string())
+        fs::rename(&part, self.path(t)).map_err(|e| e.to_string())?;
+        // Modelle der anderen Stufen brauchen nur Platz (1–3 GB)
+        for other in TIERS.iter().filter(|o| o.file != t.file) {
+            let _ = fs::remove_file(self.path(other));
+            let _ = fs::remove_file(self.dir.join(format!("{}.part", other.file)));
+        }
+        Ok(())
     }
 
     /// Stufe wechseln: altes Modell aus dem Speicher, neues sicherstellen.

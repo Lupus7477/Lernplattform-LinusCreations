@@ -16,7 +16,7 @@ Die Apps laufen **immer lokal**. Optional verbinden sie sich mit deinem Server (
 ## So funktioniert es
 
 1. **Hinzufügen:** PDF auswählen. Der Text wird im Gerät bzw. Browser gelesen (pdf.js) und in Abschnitte von etwa 5000 Zeichen geteilt. Dabei werden auch Grafiken gesucht (siehe unten).
-2. **Vorbereiten (KI, im Hintergrund):** Pro Abschnitt sortiert die KI zuerst Seiten mit reinem Organisatorischem aus (siehe unten). Dann erzeugt sie Titel, Zusammenfassung und die wichtigsten Begriffe. Fragen entstehen, wenn eine Einheit dran ist; die nächste wird vorab vorbereitet. Danach schreibt die KI 1–2 Strukturaufgaben, die zum Stoff passen.
+2. **Vorbereiten (KI, im Hintergrund):** Pro Abschnitt sortiert die KI zuerst Seiten mit reinem Organisatorischem aus (siehe unten). Dann erzeugt sie Titel, Zusammenfassung und die wichtigsten Begriffe. Fragen entstehen, wenn eine Einheit dran ist; die nächste wird vorab vorbereitet. Danach schreibt die KI 1–2 Strukturaufgaben, die zum Stoff passen. Jede Frage löst sie zur Kontrolle ein zweites Mal blind am Text; weicht sie ab, fliegt die Frage.
 3. **Lernen (ohne KI):** Die Antworten prüft der Code, nicht die KI.
    - Multiple Choice, Richtig/Falsch, Lückentext (eine oder mehrere Lücken), Begriffe zuordnen
    - **Matrix füllen:** Aussagen in Felder ziehen oder antippen. Vier Felder werden zur 2×2-Matrix, eine SWOT bekommt die Achsen intern/extern und hilfreich/schädlich. Ab Stufe 2 als Szenario („Erstelle die SWOT für ein Café“) mit Aussagen, die nirgends hingehören.
@@ -31,13 +31,15 @@ Die Apps laufen **immer lokal**. Optional verbinden sie sich mit deinem Server (
    - **Nach 2 Fehlern in Folge** kommt eine Frage, die schon sitzt (Box 3 oder höher), mit dem Label „Zwischendurch“. Sie zählt nicht zum Fortschritt und ändert ihre Box nicht. Sie soll nur ein Erfolgserlebnis geben.
    - **Nach 4 Fehlern in Folge** erklärt die KI den Stoff hinter diesen Fragen einfacher, als Folie zwischendurch: erst das Prinzip, dann ein Alltagsbeispiel, am Ende ein Merksatz. „Noch anders erklären“ öffnet den Chat.
    - Die Folie lässt sich unter Profil → Einstellungen ausschalten.
-4. **Wiederholen:** Leitner-Boxen (1, 3, 7, 14, 30 Tage). Gemerkte und prüfungsrelevante Fragen kommen zuerst.
+4. **Wiederholen:** Leitner-Boxen (1, 3, 7, 14, 30 Tage). Eine Frage steigt nur, wenn sie fällig ist. Wer eine Lektion am selben Abend wiederholt, übt (und bekommt XP), die Box bleibt aber. Gemerkte und prüfungsrelevante Fragen kommen zuerst. Die Lernkarte zeigt auch den Originaltext aus dem Skript.
 5. **Motivation:** XP, Tagesziel, Streak, Lernstufe je Einheit. Dazu kommt, ganz ohne Strafen und Wartezeiten:
+   - **XP zählt der Server:** richtig/gesamt kommt aus den Antworten, nicht vom Client. Die XP zählen insgesamt einmal (Gesamt-XP, Bestenliste über alle Kurse) und zusätzlich im Kurs, aus dem die Frage stammt. Die tägliche Wiederholung mit Fragen aus mehreren Kursen verteilt sich also auf diese Kurse. Wer eine Lektion abbricht, behält die XP für die richtigen Antworten und den Lerntag; den Bonus fürs Abschließen gibt es nur am Ende.
    - **Level und Titel pro Kurs:** Level 1–100 aus den XP dieses Kurses. Von Level n zu n+1 braucht es 40 + 20·(n−1) XP. Alle 10 Level gibt es einen neuen Titel.
-     - Beim Anlegen eines Kurses schreibt die KI 10 Titel passend zum Kursnamen, z. B. „Marketing-Starter“ bis „Marketing-Gott“.
+     - Direkt nach den ersten Fragen eines neuen Kurses schreibt die KI 10 Titel, die zum Fach passen: Rollen oder Stufen, die man dort durchläuft, z. B. bei Lehramt Praktikant, Referendar, Lehrkraft … Schulleitung. Als Kontext bekommt sie die Themen der ersten Einheiten.
+     - Ruhende Kurse (älter als 7 Tage und 30 Tage ohne Lektion) bekommen Namen und Texte erst, wenn wieder jemand darin lernt.
      - Sie benennt auch die 11 Kurs-Erfolge. Die Bedingungen und ihre Beschreibung kommen vom Code.
-     - Titel und Erfolgsnamen gelten für alle im Kurs gleich. Nach einem Umbenennen schreibt die KI sie neu.
-     - Den Kursnamen setzt der Code über `{course}` ein. So gehen auch Namen wie „Mathe 2“ durch die Ziffern-Prüfung.
+     - Titel und Erfolgsnamen gelten für alle im Kurs gleich. Nach einem Umbenennen schreibt die KI sie neu; was sie noch für den alten Namen geschrieben hat, wird verworfen.
+     - Den Kursnamen (optional) setzt der Code über `{course}` ein, höchstens einmal. So gehen auch Namen wie „Mathe 2“ durch die Ziffern-Prüfung. Die Länge prüft der Code mit eingesetztem Namen.
      - Solange die KI nichts geschrieben hat, gilt „Kursname · Stufenwort“.
    - **Rekord und Pausentage:** Das Profil zeigt die längste Serie. Für je 7 Tage in Folge gibt es einen Pausentag, höchstens 2 auf Vorrat. Verpasst du einen Tag, rettet er die Serie automatisch. Der Tag zählt nicht mit und ist im Kalender eine Schneeflocke.
    - **Erfolge:**
@@ -51,7 +53,7 @@ Die Apps laufen **immer lokal**. Optional verbinden sie sich mit deinem Server (
      - Welcher Anlass gerade passt, entscheidet der Code. Ist die KI noch nicht bereit, kommen feste Sätze.
 
    In den Apps gibt es eine **Lern-Erinnerung** (Profil → Einstellungen):
-   - **Handy:** einmal am Tag zur gewählten Uhrzeit, aber nur, wenn das Tagesziel noch offen ist.
+   - **Handy:** einmal am Tag zur gewählten Uhrzeit, aber nur, wenn das Tagesziel noch offen ist. Geplant für die nächsten 30 Tage, mit der Zahl der fälligen Fragen. Die Zahl steht auch am Tab „Wiederholen“.
    - **PC:** nur, solange die App läuft.
 
 ### Strukturaufgaben: nur wenn der Stoff sie hergibt
@@ -138,7 +140,7 @@ Profil → **Über Lernpfad** → „Fehler melden“ oder „Idee vorschlagen�
 | Kompakt | Qwen3.5 2B (Q4_K_M) | 1,3 GB | Android, iOS |
 | Ausgewogen | Qwen3.5 4B (Q4_K_M) | 2,7 GB | PC, Server |
 
-llama.cpp ist als Bibliothek eingebaut (`llama-cpp-2`). Das Modell wird beim ersten Start einmal von Hugging Face geladen (gepinnte Revision, Größe geprüft), danach läuft alles offline. Es wird erst geladen, wenn es gebraucht wird, und nach 3 Minuten Leerlauf entladen. GPU: Vulkan (Linux/Windows), Metal (Apple), CPU auf Android.
+llama.cpp ist als Bibliothek eingebaut (`llama-cpp-2`). Das Modell wird einmal von Hugging Face geladen (gepinnte Revision, Größe geprüft), danach läuft alles offline. Der Server lädt es beim ersten Start; die Apps erst, wenn man „Herunterladen“ antippt (1–3 GB, am besten im WLAN), und im Server-Modus gar nicht. Nach einem Stufenwechsel wird das alte Modell gelöscht. Es wird erst geladen, wenn es gebraucht wird, und nach 3 Minuten Leerlauf entladen. GPU: Vulkan (Linux/Windows), Metal (Apple), CPU auf Android.
 
 ## Eigener Server
 
@@ -166,7 +168,7 @@ Noch kein Konto. Einrichten (einmalig, nur mit diesem Link):
    - **Fair durch den Code, nicht die KI:** Beim Annehmen sucht der Server bis zu 8 Aufgaben so aus, dass an jeder Stelle beide dieselbe Art mit gleich vielen Teilen haben (z. B. Stelle 1 Richtig/Falsch, Stelle 2 Matrix mit 2 Feldern und 6 Aussagen). Mit demselben Kurs sind es dieselben Fragen. Unter 3 passenden Aufgaben startet kein Battle.
    - Nach einem Countdown von 3 s schickt der Server die Aufgaben, prüft jede Antwort und misst die Zeit selbst. Antworten gehen nur der Reihe nach. Mehr Richtige gewinnt, bei Gleichstand die kürzere Gesamtzeit. Aufgeben zählt als verloren, nach 15 min ist jedes Battle vorbei.
    - Den Lernfortschritt (Wiederholungen) ändert ein Battle nicht. Solange du in einem Battle Aufgaben offen hast, zeigt die App keine Lösungen (Lernkarte, Fragen-Menü), damit niemand nachschlägt.
-   - **Bestenliste nach XP, pro Kurs und für den ganzen Server:** XP aus dem Lernen plus Battle-XP (2 je richtige Antwort, 10 für den Sieg). Siege und Battles stehen daneben. Pro Kurs zählen die Lektionen dieses Kurses und die Battles, in denen jemand mit ihm angetreten ist. Die tägliche Wiederholung über mehrere Kurse zählt nur auf dem Server.
+   - **Bestenliste nach XP, pro Kurs und für den ganzen Server:** XP aus dem Lernen plus Battle-XP (2 je richtige Antwort, 10 für den Sieg). Siege und Battles stehen daneben. Pro Kurs zählen die Antworten aus diesem Kurs (auch aus der täglichen Wiederholung) und die Battles, in denen jemand mit ihm angetreten ist. Gespielte Battles bleiben, wenn ein Kurs oder ein Konto gelöscht wird. Während eines Battles lassen sich seine Fragen nicht ändern.
 5. **Handy:** Seite öffnen, „Zum Startbildschirm hinzufügen“. Oder die App über den Verbindungslink aus Profil → Konto verbinden.
 
 **Lokale Daten mitnehmen:** Die `lernen.db` der App vor dem ersten Start in den Datenordner kopieren. Dein Konto aus der Einrichtung übernimmt dann alle Kurse und den Fortschritt.
@@ -179,6 +181,8 @@ docker compose logs lernpfad     # Einrichtungslink
 ```
 
 Im Container kennt der Server die Adresse deines Rechners nicht. Trag sie in `compose.override.yaml` ein (wird nicht eingecheckt): `command: ["--host", "192.168.1.20"]`.
+
+Tagesgrenzen (Streak, Tagesziel, Kalender) gelten in der Zeitzone des Containers. Das Image setzt `TZ=Europe/Berlin`; eine andere trägst du unter `environment:` ein.
 
 ### Automatisch aktualisieren
 

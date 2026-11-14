@@ -303,6 +303,12 @@ pub fn delete_account(conn: &mut Connection, uid: i64) -> Result<(), String> {
     tx.execute("DELETE FROM courses WHERE owner_id = ?1", [uid]).map_err(e)?;
     tx.execute("DELETE FROM lessons WHERE user_id = ?1", [uid]).map_err(e)?;
     tx.execute("DELETE FROM settings WHERE key = ?1", [format!("goal:{uid}")]).map_err(e)?;
+    // Gespielte Battles bleiben, damit die Siege der anderen weiter zählen: das Konto wird zu -id (die Bestenliste
+    // überspringt es, eine später neu vergebene ID erbt nichts). Offene Herausforderungen fallen weg.
+    tx.execute("DELETE FROM battles WHERE a_id = ?1 AND b_id IS NULL", [uid]).map_err(e)?;
+    tx.execute("UPDATE battles SET a_id = -a_id WHERE a_id = ?1", [uid]).map_err(e)?;
+    tx.execute("UPDATE battles SET b_id = -b_id WHERE b_id = ?1", [uid]).map_err(e)?;
+    tx.execute("UPDATE battle_answers SET user_id = -user_id WHERE user_id = ?1", [uid]).map_err(e)?;
     tx.execute("DELETE FROM users WHERE id = ?1", [uid]).map_err(e)?;
     tx.commit().map_err(e)
 }
@@ -379,7 +385,9 @@ mod tests {
              INSERT INTO users(id, name, pw_hash, created_at) VALUES(2, 'Anna', 'x', 0), (3, 'Ben', 'x', 0);
              INSERT INTO courses(id, name, created_at, owner_id, shared) VALUES(10, 'Geteilt', 0, 2, 1), (11, 'Privat', 0, 2, 0), (12, 'Ausgewählt', 0, 2, 0);
              INSERT INTO course_members(course_id, user_id) VALUES(12, 1), (12, 3);
-             INSERT INTO lessons(xp, correct, total, finished_at, user_id) VALUES(10, 1, 1, 0, 2);",
+             INSERT INTO lessons(xp, correct, total, finished_at, user_id) VALUES(10, 1, 1, 0, 2);
+             INSERT INTO battles(id, a_id, a_course, b_id, b_course, created_at, started_ms) VALUES(1, 3, 12, 2, 11, 0, 0), (2, 2, 11, NULL, NULL, 0, NULL);
+             INSERT INTO battle_answers(battle_id, user_id, idx, correct, ms) VALUES(1, 2, 0, 1, 10), (1, 3, 0, 0, 20);",
         )
         .unwrap();
         assert!(delete_account(&mut conn, 1).is_err(), "letzter Admin bleibt");
@@ -394,6 +402,11 @@ mod tests {
         assert_eq!(n("SELECT COUNT(*) FROM users WHERE id = 2"), 0);
         assert_eq!(n("SELECT COUNT(*) FROM lessons WHERE user_id = 2"), 0);
         assert_eq!(n("SELECT COUNT(*) FROM course_members WHERE course_id = 12"), 1, "Admin ist jetzt Besitzer statt Mitglied");
+        // Bens Battle gegen Anna bleibt (sein Ergebnis zählt weiter), Anna wird -2, ihr privater Kurs NULL; ihre offene Herausforderung ist weg
+        assert_eq!(n("SELECT COUNT(*) FROM battles"), 1);
+        assert_eq!(n("SELECT b_id FROM battles WHERE id = 1"), -2);
+        assert_eq!(n("SELECT COUNT(*) FROM battles WHERE id = 1 AND b_course IS NULL"), 1);
+        assert_eq!(n("SELECT COUNT(*) FROM battle_answers WHERE user_id = -2"), 1);
         let _ = std::fs::remove_file(&path);
     }
 }

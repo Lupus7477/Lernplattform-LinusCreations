@@ -308,8 +308,10 @@ pub fn run() {
             let online = Arc::new(AtomicBool::new(false));
             let (ai_handle, course_handle) = (app.handle().clone(), app.handle().clone());
             let (quiet_ai, quiet_course) = (online.clone(), online.clone());
+            // KI erst laden, wenn man es antippt: 1–3 GB, unterwegs evtl. über mobile Daten, im Server-Modus unnötig
             let core = Core::open(
                 &dir,
+                false,
                 move |s| {
                     if !quiet_ai.load(Ordering::SeqCst) {
                         let _ = ai_handle.emit("ai-status", s);

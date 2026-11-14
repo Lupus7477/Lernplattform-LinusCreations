@@ -23,11 +23,13 @@ COPY . .
 RUN cargo build --release -p lernpfad-server
 
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates libvulkan1 mesa-vulkan-drivers libgomp1 \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates libvulkan1 mesa-vulkan-drivers libgomp1 tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --home /data lernpfad \
     && mkdir -p /data && chown lernpfad:lernpfad /data
+# Tagesgrenzen (Streak, Tagesziel, Kalender) in deutscher Zeit statt UTC; ändern über TZ in compose.yaml
+ENV TZ=Europe/Berlin
 COPY --from=build /src/target/release/lernpfad-server /usr/local/bin/lernpfad-server
 COPY web /app/web
 USER lernpfad

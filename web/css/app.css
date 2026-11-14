@@ -276,6 +276,26 @@ main:focus,
   box-sizing: content-box;
   border-radius: var(--pill);
 }
+/* Fällige Fragen am Tab „Wiederholen“: ruhige Akzentfarbe statt Rot, es ist eine Einladung, kein Alarm */
+.tab {
+  position: relative;
+}
+.tab[data-due]::after {
+  content: attr(data-due);
+  position: absolute;
+  top: 2px;
+  left: calc(50% + 8px);
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border-radius: var(--pill);
+  background: var(--royal);
+  color: var(--on-royal);
+  font: 800 0.72rem/20px var(--font-text);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
 .tab[aria-current="page"] {
   color: var(--royal);
 }
@@ -325,6 +345,10 @@ main:focus,
   .tab .icon {
     padding: 0;
     background: none !important;
+  }
+  .tab[data-due]::after {
+    position: static;
+    margin-left: auto;
   }
   .tab[aria-current="page"] {
     background: var(--royal-soft);
@@ -1984,6 +2008,12 @@ textarea.input {
 }
 .q-box[open] > summary .icon {
   rotate: 180deg; /* Zustand, keine Bewegung: Nachschlagen soll nicht bremsen */
+}
+.source-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+  color: var(--ink-2);
 }
 .q-list {
   display: grid;

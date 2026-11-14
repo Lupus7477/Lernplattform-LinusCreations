@@ -147,6 +147,11 @@ ALTER TABLE courses ADD COLUMN motivation TEXT;
 CREATE TABLE course_badges(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE, id TEXT NOT NULL, at INTEGER NOT NULL,
   PRIMARY KEY(user_id, course_id, id)) WITHOUT ROWID;
+-- Bisherige Kurs-Erfolge mit Datum behalten: sie gehen an den Kurs, in dem die Person am meisten gelernt hat.
+INSERT OR IGNORE INTO course_badges(user_id, course_id, id, at)
+  SELECT user_id, c, id, at FROM (SELECT b.user_id, b.id, b.at,
+    (SELECT l.course_id FROM lessons l WHERE l.user_id = b.user_id AND l.course_id IS NOT NULL GROUP BY l.course_id ORDER BY COUNT(*) DESC, l.course_id LIMIT 1) AS c
+    FROM badges b WHERE b.id NOT IN ('week', 'month', 'comeback')) WHERE c IS NOT NULL;
 DELETE FROM badges WHERE id NOT IN ('week', 'month', 'comeback');
 DROP TABLE cheers;
 CREATE TABLE cheers(id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
@@ -156,6 +161,30 @@ CREATE TABLE motivation_rounds(course_id INTEGER NOT NULL REFERENCES courses(id)
   part TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY(course_id, part)) WITHOUT ROWID;
 DELETE FROM settings WHERE key LIKE 'cheers_round:%';
 PRAGMA user_version = 7;
+";
+
+/// Version 8: XP zählt der Server. `lesson_answers` = Erstantworten der laufenden Lektion (beim Abschluss verbraucht).
+/// `lessons.main` = 1, wenn die Zeile als abgeschlossene Lektion zählt; 0 = Anteil einer Wiederholung an einem weiteren Kurs
+/// oder abgebrochene Lektion (zählt nur für XP, Aufgaben und Lerntag).
+/// Lektionen ohne Kurs bekommen ihn, wenn die Person nur in einem Kurs lernt. Battles bleiben, wenn Kurs oder Konto
+/// gelöscht wird: Kurs → NULL, Konten ohne Fremdschlüssel (beim Löschen setzt der Server die ID auf -id).
+const V8: &str = "
+CREATE TABLE lesson_answers(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE, correct INTEGER NOT NULL,
+  PRIMARY KEY(user_id, question_id)) WITHOUT ROWID;
+ALTER TABLE lessons ADD COLUMN main INTEGER NOT NULL DEFAULT 1;
+UPDATE lessons SET course_id = (SELECT MIN(l.course_id) FROM lessons l WHERE l.user_id = lessons.user_id)
+  WHERE course_id IS NULL AND (SELECT COUNT(DISTINCT l.course_id) FROM lessons l WHERE l.user_id = lessons.user_id) = 1;
+CREATE TABLE battles_new(id INTEGER PRIMARY KEY,
+  a_id INTEGER NOT NULL, a_course INTEGER REFERENCES courses(id) ON DELETE SET NULL,
+  b_id INTEGER, b_course INTEGER REFERENCES courses(id) ON DELETE SET NULL,
+  a_qs TEXT NOT NULL DEFAULT '[]', b_qs TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, started_ms INTEGER, gave_up INTEGER);
+INSERT INTO battles_new SELECT id, a_id, a_course, b_id, b_course, a_qs, b_qs, created_at, started_ms, gave_up FROM battles;
+DROP TABLE battles;
+ALTER TABLE battles_new RENAME TO battles;
+CREATE INDEX battles_a_course ON battles(a_course);
+CREATE INDEX battles_b_course ON battles(b_course);
+PRAGMA user_version = 8;
 ";
 
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
@@ -190,7 +219,17 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     if version < 7 {
         conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V7} COMMIT; PRAGMA foreign_keys = ON;"))?;
     }
+    if version < 8 {
+        conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {V8} COMMIT; PRAGMA foreign_keys = ON;"))?;
+    }
     Ok(conn)
+}
+
+/// Erste Spalte aller Zeilen.
+pub fn column<T: rusqlite::types::FromSql>(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> rusqlite::Result<Vec<T>> {
+    let mut st = conn.prepare(sql)?;
+    let rows = st.query_map(p, |r| r.get(0))?;
+    rows.collect()
 }
 
 pub fn now() -> i64 {
@@ -218,7 +257,7 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Resul
 /// Nächste Hintergrund-Aufgabe:
 /// 1. Prüfungsthemen einer Einheit, die auf Fragen wartet (kurz, damit die Fragen den Schwerpunkt kennen)
 /// 2. gewünschte Fragen
-/// 2b. Titel und Erfolgsnamen eines Kurses (ein kurzer Aufruf, gleich nach dem Anlegen)
+/// 2b. Titel und Erfolgsnamen eines Kurses (ein kurzer Aufruf, gleich nach seinen ersten Fragen; nur genutzte Kurse)
 /// 3. noch nicht analysierte Abschnitte
 /// 4. Prüfungsthemen der übrigen Einheiten
 /// 5. Fragen geänderter Abschnitte prüfen (PDF ersetzt)
@@ -321,33 +360,69 @@ pub fn next_task(conn: &Connection) -> rusqlite::Result<Option<Task>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn v7_backfills_lesson_course() {
-        let dir = std::env::temp_dir().join(format!("lernpfad-test-v7-{}", std::process::id()));
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("lernpfad-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("lernen.db");
+        dir.join("lernen.db")
+    }
+
+    #[test]
+    fn v7_v8_keep_courses_badges_and_battles() {
+        let path = tmp("v8");
         {
-            // Datenbank auf Version 6 mit einer Lektion einer Einheit und einem alten Motivationstext
+            // Datenbank auf Version 6: Lektionen einer Einheit und eine ohne Einheit, Erfolge, ein altes Battle
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(SCHEMA).unwrap();
             for v in [V1, V2, V3, V4, V5, V6] {
                 conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; BEGIN; {v} COMMIT; PRAGMA foreign_keys = ON;")).unwrap();
             }
             conn.execute_batch(
-                "INSERT INTO courses(id, name, created_at) VALUES(5, 'Marketing', 0);
+                "INSERT INTO users(id, name, created_at) VALUES(2, 'Ben', 0);
+                 INSERT INTO courses(id, name, created_at) VALUES(5, 'Marketing', 0), (6, 'Makro', 0);
                  INSERT INTO documents(id, course_id, name, pages, created_at) VALUES(1, 5, 'a.pdf', 1, 0);
                  INSERT INTO units(id, course_id, document_id, idx, page_from, page_to, title, source_text) VALUES(1, 5, 1, 0, 1, 1, 'T', 'x');
                  INSERT INTO lessons(unit_id, xp, correct, total, finished_at) VALUES(1, 20, 5, 6, 100), (NULL, 10, 1, 1, 200);
-                 INSERT INTO badges(user_id, id, at) VALUES(1, 'first', 1), (1, 'week', 1);
-                 INSERT INTO cheers(occasion, text) VALUES('done', 'Gut gemacht!');",
+                 INSERT INTO badges(user_id, id, at) VALUES(1, 'first', 77), (1, 'week', 1);
+                 INSERT INTO cheers(occasion, text) VALUES('done', 'Gut gemacht!');
+                 INSERT INTO battles(id, a_id, a_course, b_id, b_course, created_at, started_ms) VALUES(1, 1, 5, 2, 6, 0, 0);
+                 INSERT INTO battle_answers(battle_id, user_id, idx, correct, ms) VALUES(1, 1, 0, 1, 10);",
             )
             .unwrap();
         }
         let conn = open(&path).unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        let courses: Vec<Option<i64>> = conn.prepare("SELECT course_id FROM lessons ORDER BY id").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
-        let badges: Vec<String> = conn.prepare("SELECT id FROM badges").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
-        assert_eq!((v, courses, badges), (7, vec![Some(5), None], vec!["week".to_string()]));
+        assert_eq!(v, 8);
+        // Lektion ohne Einheit: nur ein Kurs → gehört zu ihm
+        let courses: Vec<Option<i64>> = column(&conn, "SELECT course_id FROM lessons ORDER BY id", []).unwrap();
+        assert_eq!(courses, vec![Some(5), Some(5)]);
+        // Kurs-Erfolg mit altem Datum im Kurs mit den meisten Lektionen, Serien-Erfolg bleibt allgemein
+        let kept: (i64, String, i64) = conn.query_row("SELECT course_id, id, at FROM course_badges", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(kept, (5, "first".to_string(), 77));
+        assert_eq!(column::<String>(&conn, "SELECT id FROM badges", []).unwrap(), vec!["week".to_string()]);
+        // Kurs gelöscht: das Battle (und damit die Siege) bleibt, nur ohne Kurs
+        conn.execute("DELETE FROM courses WHERE id = 6", []).unwrap();
+        let (b_course, answers): (Option<i64>, i64) =
+            conn.query_row("SELECT b_course, (SELECT COUNT(*) FROM battle_answers WHERE battle_id = 1) FROM battles WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((b_course, answers), (None, 1));
+    }
+
+    #[test]
+    fn names_only_for_courses_in_use() {
+        let conn = open(&tmp("wanted-names")).unwrap();
+        conn.execute_batch(
+            "INSERT INTO courses(id, name, created_at) VALUES(1, 'Alt', 0), (2, 'Alt, aber genutzt', 0), (3, 'Ohne Fragen', strftime('%s', 'now')), (4, 'Neu', strftime('%s', 'now'));
+             INSERT INTO documents(id, course_id, name, pages, created_at) VALUES(1, 1, 'a.pdf', 1, 0), (2, 2, 'b.pdf', 1, 0), (4, 4, 'd.pdf', 1, 0);
+             INSERT INTO units(id, course_id, document_id, idx, page_from, page_to, title, source_text) VALUES(1, 1, 1, 0, 1, 1, 'T', 'x'), (2, 2, 2, 0, 1, 1, 'T', 'x'), (4, 4, 4, 0, 1, 1, 'T', 'x');
+             INSERT INTO questions(unit_id, kind, prompt, options, answer) VALUES(1, 'mc', 'F', '[]', 'a'), (2, 'mc', 'F', '[]', 'a'), (4, 'mc', 'F', '[]', 'a');
+             INSERT INTO lessons(unit_id, xp, correct, total, finished_at, course_id) VALUES(2, 10, 1, 1, strftime('%s', 'now'), 2);",
+        )
+        .unwrap();
+        // Der neue Kurs mit Fragen zuerst, dann der genutzte alte; der ruhende und der ohne Fragen nie
+        assert_eq!(crate::motivation::wanted_names(&conn), Some(4));
+        conn.execute("UPDATE courses SET motivation = '{}' WHERE id = 4", []).unwrap();
+        assert_eq!(crate::motivation::wanted_names(&conn), Some(2));
+        conn.execute("UPDATE courses SET motivation = '{}' WHERE id = 2", []).unwrap();
+        assert_eq!(crate::motivation::wanted_names(&conn), None);
     }
 }

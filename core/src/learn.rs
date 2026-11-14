@@ -114,9 +114,10 @@ pub fn due_at(boxed: i64, now: i64) -> i64 {
 }
 
 /// XP einer Lektion: +2 je richtiger Aufgabe, +5 fürs Abschließen, +5 wenn fehlerfrei.
-pub fn lesson_xp(correct: i64, total: i64) -> i64 {
+/// Abgebrochen (`complete = false`): nur die richtigen Aufgaben, sonst lohnte sich „eine Antwort, abbrechen“.
+pub fn lesson_xp(correct: i64, total: i64, complete: bool) -> i64 {
     let perfect = if total > 0 && correct >= total { 5 } else { 0 };
-    2 * correct + 5 + perfect
+    2 * correct + if complete { 5 + perfect } else { 0 }
 }
 
 /// Streak = Anzahl Lerntage der Folge, die heute oder gestern endet.
@@ -186,9 +187,9 @@ pub fn level(total_xp: i64) -> (i64, i64, i64) {
 // ponytail: feste Titel je 10 Level; Wörter frei änderbar.
 pub const TITLES: [&str; 10] = ["Erste Schritte", "Neugierig", "Wissbegierig", "Fleißig", "Sattelfest", "Kenntnisreich", "Souverän", "Meisterhaft", "Brillant", "Legendär"];
 
-/// Titel zum Level (je 10 Level ein neuer, Level 100 = der letzte).
-pub fn title(level: i64) -> &'static str {
-    TITLES[((level.clamp(1, MAX_LEVEL) - 1) / 10).min(9) as usize]
+/// Titelstufe zum Level (0–9): je 10 Level eine neue, Level 100 = die letzte.
+pub fn stage(level: i64) -> usize {
+    ((level.clamp(1, MAX_LEVEL) - 1) / 10).min(9) as usize
 }
 
 /// Kleiner Zufallsgenerator zum Mischen (kein Krypto, nur Reihenfolge).
@@ -265,8 +266,9 @@ mod tests {
 
     #[test]
     fn xp_and_streak() {
-        assert_eq!(lesson_xp(10, 10), 30);
-        assert_eq!(lesson_xp(7, 10), 19);
+        assert_eq!(lesson_xp(10, 10, true), 30);
+        assert_eq!(lesson_xp(7, 10, true), 19);
+        assert_eq!(lesson_xp(3, 3, false), 6);
         assert_eq!(streak(&[], &[], 100), 0);
         assert_eq!(streak(&[100, 99, 99, 98, 96], &[], 100), 3);
         assert_eq!(streak(&[99, 98], &[], 100), 2); // gestern zählt noch
@@ -297,7 +299,7 @@ mod tests {
         assert_eq!(level(100), (3, 0, 80));
         assert_eq!(level(1080).0, 10);
         assert_eq!(level(i64::MAX / 4).0, MAX_LEVEL);
-        assert_eq!((title(1), title(10), title(11), title(100)), ("Erste Schritte", "Erste Schritte", "Neugierig", "Legendär"));
+        assert_eq!((stage(1), stage(10), stage(11), stage(100)), (0, 0, 1, 9));
     }
 
     #[test]

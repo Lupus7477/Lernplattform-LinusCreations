@@ -8,6 +8,9 @@ services:
     volumes:
       - lernpfad-data:/data
     restart: unless-stopped
+    # Zeitzone für Streak, Tagesziel und Kalender (Standard im Image: Europe/Berlin)
+    # environment:
+    #   TZ: Europe/Vienna
     # Weitere Namen fürs Zertifikat (z. B. Tailscale) und GPU per Vulkan, beides optional:
     # command: ["--host", "pc.tailnet.ts.net"]
     # devices:

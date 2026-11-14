@@ -11,27 +11,36 @@ const iso = (d) => d.toLocaleDateString("sv-SE"); // JJJJ-MM-TT in lokaler Zeit
 
 export async function render() {
   const page = h("div.page");
-  // Level, Titel und Erfolge gelten pro Kurs: beim Kurswechsel neu laden
+  // Level, Titel und Erfolge gelten pro Kurs: beim Kurswechsel neu laden. Nur die letzte Anfrage zählt, zusammen mit
+  // dem Kurs, für den sie gestellt wurde (sonst stünden bei schnellem Wechseln Level und Erfolge unter dem falschen Namen).
   let stats;
   let badges;
-  const load = async () => ([stats, badges] = await Promise.all([loadStats(), call("badges", { courseId: currentCourse()?.id ?? null }).catch(() => [])]));
+  let shown;
+  let seq = 0;
+  const load = async () => {
+    const mine = ++seq;
+    const course = currentCourse();
+    const got = await Promise.all([loadStats(), call("badges", { courseId: course?.id ?? null }).catch(() => [])]);
+    if (mine === seq) [stats, badges, shown] = [...got, course];
+    return mine === seq;
+  };
   const [tiers, about] = await Promise.all([call("ai_tiers"), aboutCard(), load()]);
   // Konto-Karten einmal bauen: das Neuzeichnen bei KI-Statusmeldungen soll nicht jedes Mal den Server fragen.
   const user = state.session?.user;
   const server = user
     ? [accountCard(user), devicesCard(), user.admin ? membersCard() : null]
     : window.__TAURI__ && state.session?.mode === "local" ? [connectCard()] : [];
-  const draw = () => page.replaceChildren(...content(stats, tiers, server, badges), about);
+  const draw = () => page.replaceChildren(...content(stats, tiers, server, badges, shown), about);
   draw();
-  page.cleanup = subscribe((kind) => {
+  page.cleanup = subscribe((kind, id) => {
     if (kind === "ai") draw();
-    if (kind === "course-selected") load().then(draw);
+    // course-updated: z. B. hat die KI gerade Titel und Erfolgsnamen geschrieben
+    if (kind === "course-selected" || (kind === "course-updated" && (id == null || id === shown?.id))) load().then((latest) => latest && draw());
   });
   return page;
 }
 
-function content(s, tiers, server, badges) {
-  const course = currentCourse();
+function content(s, tiers, server, badges, course) {
   return [
     h("h1", "Profil"),
     h(
@@ -40,6 +49,7 @@ function content(s, tiers, server, badges) {
       h("div.level-bar", h("div.bar", { role: "progressbar", "aria-label": `Level ${s.level}`, "aria-valuemin": "0", "aria-valuemax": String(s.level_need), "aria-valuenow": String(s.level_xp) }, h("i", { style: { "--p": String(s.level_xp / s.level_need) } }))),
       h("p.muted.num", `Noch ${s.level_need - s.level_xp} XP bis Level ${s.level + 1}${course ? ` in „${course.name}“` : ""}.`),
       s.next_title ? h("p.hint", `Nächster Titel ab Level ${s.next_title.level}: ${s.next_title.title}`) : null,
+      h("p.hint.num", `Insgesamt ${s.total_xp} XP über alle Kurse.`),
     ),
     h(
       "div.card",
@@ -56,7 +66,7 @@ function content(s, tiers, server, badges) {
       ),
     ),
     h("div.card", h("h2", "Letzte 6 Wochen"), calendar(s.active_days, s.frozen_days)),
-    badges.length ? badgeCard(badges) : null,
+    badges.length ? badgeCard(badges, course) : null,
     h("div.card", h("h2", "Diese Woche"), week(s.week, s.goal)),
     settings(s),
     ...server.filter(Boolean),
@@ -65,7 +75,7 @@ function content(s, tiers, server, badges) {
 }
 
 /** Erfolge: die des Kurses (Namen von der KI) und die allgemeinen. Freigeschaltete farbig mit Datum, gesperrte blass mit ihrem Ziel. */
-function badgeCard(badges) {
+function badgeCard(badges, course) {
   const got = badges.filter((b) => b.at).length;
   const ofCourse = badges.filter((b) => !b.global);
   const grid = (list) =>
@@ -84,7 +94,7 @@ function badgeCard(badges) {
   return h(
     "div.card",
     h("h2", `Erfolge · ${got} von ${badges.length}`),
-    ofCourse.length ? [h("p.q-kind", `In „${currentCourse()?.name ?? "diesem Kurs"}“`), grid(ofCourse)] : null,
+    ofCourse.length ? [h("p.q-kind", `In „${course?.name ?? "diesem Kurs"}“`), grid(ofCourse)] : null,
     h("p.q-kind", "Allgemein"),
     grid(badges.filter((b) => b.global)),
   );
@@ -234,7 +244,7 @@ function aiCard(tiers) {
   const onServer = state.session?.mode === "server";
   const canPick = !onServer || state.session.user?.admin;
   const line =
-    ai?.state === "ready" ? (ai.loaded ? "Bereit und gerade im Speicher." : "Bereit. Ruht, bis du sie brauchst.") : ai?.state === "downloading" ? `Wird geladen: ${gb(ai.done)} von ${gb(ai.total)} GB` : ai?.state === "error" ? "Nicht verfügbar." : "Wird vorbereitet.";
+    ai?.state === "ready" ? (ai.loaded ? "Bereit und gerade im Speicher." : "Bereit. Ruht, bis du sie brauchst.") : ai?.state === "downloading" ? `Wird geladen: ${gb(ai.done)} von ${gb(ai.total)} GB` : ai?.state === "error" ? "Nicht verfügbar." : ai?.state === "missing" ? "Noch nicht heruntergeladen." : "Wird vorbereitet.";
   return h(
     "div.card",
     h("h2", onServer ? "KI auf dem Server" : "KI auf diesem Gerät"),
@@ -261,7 +271,7 @@ function aiCard(tiers) {
       "p.muted",
       onServer
         ? "Die KI läuft auf deinem eigenen Server, nichts geht an fremde Dienste."
-        : "Die KI läuft komplett auf diesem Gerät. Nach drei Minuten ohne Nutzung gibt sie den Arbeitsspeicher wieder frei. Ein Wechsel lädt das andere Modell einmalig herunter.",
+        : "Die KI läuft komplett auf diesem Gerät. Nach drei Minuten ohne Nutzung gibt sie den Arbeitsspeicher wieder frei. Ein Wechsel lädt das andere Modell einmalig herunter und löscht das alte.",
     ),
   );
 }

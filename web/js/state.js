@@ -40,9 +40,13 @@ export async function loadCourses() {
   return state.courses;
 }
 
+let statsSeq = 0;
 export async function loadStats() {
-  state.stats = await call("stats", { courseId: currentCourse()?.id ?? null }); // Level und Titel des gewählten Kurses
-  if (state.stats.notice) toast(state.stats.notice); // gerade eingesetzter Pausentag, kommt nur einmal
+  const mine = ++statsSeq;
+  const stats = await call("stats", { courseId: currentCourse()?.id ?? null }); // Level und Titel des gewählten Kurses
+  if (stats.notice) toast(stats.notice); // gerade eingesetzter Pausentag, kommt nur einmal
+  if (mine !== statsSeq) return stats; // inzwischen neu angefragt (Kurswechsel): die neuere Antwort gilt
+  state.stats = stats;
   emit("stats", state.stats);
   return state.stats;
 }
@@ -58,6 +62,18 @@ export function aiNotice(ai = state.ai) {
       h("b", "Die KI konnte nicht geladen werden"),
       h("span.muted", ai.message),
       h("div.actions", h("button.btn.secondary", { type: "button", onclick: () => call("ai_retry") }, icon("arrow-clockwise"), "Erneut versuchen")),
+    );
+  }
+  // Die App lädt erst auf Wunsch: 1–3 GB, unterwegs vielleicht über mobile Daten. Auf dem Server darf das nur ein Admin.
+  if (ai.state === "missing") {
+    const may = state.session?.mode !== "server" || state.session.user?.admin;
+    return h(
+      "div.notice",
+      { role: "status" },
+      icon("download-simple"),
+      h("b", "KI herunterladen"),
+      h("span.muted.num", `Einmalig ${gb(ai.size)} GB, am besten im WLAN. Danach schreibt sie Fragen und Erklärungen offline auf diesem Gerät.`),
+      may ? h("div.actions", h("button.btn", { type: "button", onclick: (e) => ((e.currentTarget.disabled = true), call("ai_retry")) }, icon("download-simple"), `Herunterladen (${gb(ai.size)} GB)`)) : null,
     );
   }
   const done = ai.done || 0;
