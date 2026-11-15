@@ -183,11 +183,64 @@ button {
   outline-offset: 3px;
   border-radius: 6px;
 }
+/* Eigene Icons (web/icons.svg, Quelle design/icons.vectorcraft): Outline im Ruhezustand,
+   beim Hover füllen sich die Flächen und die Kontur wird dunkel. fill/stroke erben in <use> hinein. */
 .icon {
   width: 1.25em;
   height: 1.25em;
   flex: none;
   vertical-align: -0.2em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition:
+    fill 150ms var(--ease-out),
+    stroke 150ms var(--ease-out);
+}
+/* Dauerhaft gefüllt: früher „…-fill“ (markiert), verdiente Erfolge und der aktive Tab, denn Handys haben kein Hover */
+.icon.filled,
+.badge .icon,
+.badge-tile .icon,
+.tab[aria-current="page"] .icon {
+  fill: var(--icon-fill, var(--royal));
+  stroke: var(--ink);
+}
+@media (hover: hover) and (pointer: fine) {
+  :is(a, button, summary, label):not(:disabled):hover .icon {
+    fill: var(--icon-fill, var(--royal));
+    stroke: var(--ink);
+  }
+}
+.i-fire {
+  --icon-fill: var(--ember);
+}
+.i-crown,
+.i-star,
+.i-trophy,
+.i-sparkle,
+.i-seal-check,
+.i-warning {
+  --icon-fill: var(--marker);
+}
+.i-check,
+.i-check-circle {
+  --icon-fill: var(--right);
+}
+.i-x-circle,
+.i-trash {
+  --icon-fill: var(--wrong);
+}
+/* Auf vollfarbigen Flächen verschwände die Farbe im Hintergrund: dort mit der Textfarbe füllen */
+:is(.btn:not(.secondary, .ghost), .node) .icon:not(.filled) {
+  --icon-fill: currentColor;
+}
+/* Noch nicht verdient: Outline */
+.badge-tile.locked .icon,
+.chip.streak.off .icon {
+  fill: none;
+  stroke: currentColor;
 }
 .muted {
   color: var(--ink-2);

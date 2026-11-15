@@ -16,7 +16,7 @@ const views = { learn: path, review, add, profile, unit, battle };
 const TABS = [
   ["learn", "path", "Lernen"],
   ["review", "cards", "Wiederholen"],
-  ["battle", "crown-fill", "Battle"], // nur mit eigenem Server: braucht andere Konten
+  ["battle", "crown", "Battle"], // nur mit eigenem Server: braucht andere Konten
   ["add", "plus-circle", "Hinzufügen"],
   ["profile", "user-circle", "Profil"],
 ];

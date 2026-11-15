@@ -673,7 +673,7 @@ function focusField(c) {
       if (chip.getAttribute("aria-pressed") === "true") return;
       if (add(x)) toast(`Gekürzt: Es passen ${MAX_FOCUS} Zeichen.`, { error: true });
       chip.setAttribute("aria-pressed", "true");
-      chip.querySelector("use").setAttribute("href", "#i-check");
+      chip.querySelector(".icon").replaceWith(icon("check"));
     });
     return chip;
   });

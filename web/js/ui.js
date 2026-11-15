@@ -29,12 +29,15 @@ export function append(el, kids) {
   return el;
 }
 
+/** Outline-Icon aus web/icons.svg. „…-fill“ heißt: dasselbe Icon, dauerhaft gefüllt (CSS .icon.filled). */
 export function icon(name, cls = "") {
+  const filled = name.endsWith("-fill");
+  const base = filled ? name.slice(0, -5) : name;
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", `icon ${cls}`.trim());
+  svg.setAttribute("class", `icon i-${base} ${filled ? "filled" : ""} ${cls}`.replace(/\s+/g, " ").trim());
   svg.setAttribute("aria-hidden", "true");
   const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
-  use.setAttribute("href", `#i-${name}`);
+  use.setAttribute("href", `#i-${base}`);
   svg.append(use);
   return svg;
 }
