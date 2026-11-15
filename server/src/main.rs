@@ -481,7 +481,15 @@ fn stream_call(s: &Arc<Srv>, who: Who, cmd: String, args: Value) -> Response {
         };
         let _ = tx.send(format!("{last}\n"));
     });
-    let body = Body::from_stream(stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|l| (Ok::<_, Infallible>(l), rx)) }));
+    // Leerzeile nach 15 s Stille (Modell laden, Warten auf den Worker, langer Prompt): Proxys und NAT kappen sonst die Verbindung.
+    // Beide Clients überspringen leere Zeilen.
+    let body = Body::from_stream(stream::unfold(rx, |mut rx| async move {
+        let line = match tokio::time::timeout(Duration::from_secs(15), rx.recv()).await {
+            Ok(l) => l?,
+            Err(_) => "\n".into(),
+        };
+        Some((Ok::<_, Infallible>(line), rx))
+    }));
     ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
 }
 

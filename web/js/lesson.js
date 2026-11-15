@@ -56,6 +56,11 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   let bestRun = 0;
   let miss = 0; // falsch in Folge, nur normale Aufgaben (Erfolgsfragen zählen nicht)
   const missed = []; // diese Fehler, für die Erklär-Folie
+  let tip = null; // fertige Erklärung { text, unit }
+  let pending = null; // laufende Anfrage (Kennung: ein verworfenes Ergebnis kommt nicht an)
+  let wanted = false; // 4. Fehler in Folge: Folie zeigen, sobald die Erklärung da ist
+  let paused = 0; // Zeit auf Erklär-Folien, zählt nicht zur Lektionszeit
+  let slideAt = 0;
   let boosts = []; // Erfolgsfragen: sitzen schon, kommen nach je 2 Fehlern in Folge
   let cheers = []; // Lob nach einer richtigen Erfolgsfrage
   let cur = null;
@@ -529,6 +534,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
         solved++;
         miss = 0;
         missed.length = 0;
+        if (!wanted) pending = tip = null; // vorbereitete Erklärung nach 3 Fehlern wird nicht gebraucht
       }
       run++;
       bestRun = Math.max(bestRun, run);
@@ -586,45 +592,60 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     fb.classList.remove("open");
     root.style.setProperty("--cover", "0px");
     body.classList.remove("fit");
-    if (miss >= 4 && !battleId && pref.get("reexplain", "on") === "on" && state.ai?.state === "ready") {
-      miss = 0;
-      return slide(missed.splice(0));
+    if (phase === "slide") paused += Date.now() - slideAt;
+    if (!battleId && pref.get("reexplain", "on") === "on" && state.ai?.state === "ready") {
+      // Schon ab dem 3. Fehler in Folge vorbereiten: Kommt der 4., ist die Erklärung oft schon fertig.
+      // Klappte die Anfrage nach dem 3. nicht, versucht es der 4. noch einmal.
+      if (miss >= 3 && !pending && !tip) explain(missed.slice(), cur?.ex.id);
+      if (miss >= 4) {
+        miss = 0;
+        missed.length = 0;
+        wanted = true;
+      }
+    }
+    if (tip && wanted) {
+      const t = tip;
+      tip = null;
+      wanted = false;
+      return slide(t);
     }
     if (!queue.length) return total ? finish() : exit();
     cur = { ex: queue.shift() };
     show();
   }
 
-  /** Erklär-Folie nach 4 Fehlern in Folge: Die KI erklärt den Stoff dahinter einfacher, mit Beispiel und Merksatz. */
-  async function slide(items) {
+  /** Die KI erklärt den Stoff hinter den Fehlern einfacher, im Hintergrund. Die Lektion läuft weiter, die Folie kommt nach dem 4. Fehler, sobald der Text fertig ist. */
+  async function explain(items, questionId) {
+    const me = (pending = {});
+    let unit = unitId;
+    if (unit == null && questionId) unit = (await call("question", { questionId }).catch(() => null))?.unit_id ?? null;
+    // Anweisung zuerst: Der Kern kürzt lange Nachrichten am Ende.
+    const sent = `Erkläre mir den Stoff hinter diesen Fragen einfacher als im Skript: erst kurz das Prinzip, dann ein Beispiel aus dem Alltag. Schließe mit einer Zeile „**Merke:** …“. Diese Fragen habe ich gerade nacheinander falsch beantwortet:\n\n${items.join("\n\n")}`;
+    try {
+      const text = await stream("ask", { unitId: unit, messages: [{ role: "user", content: sent }] }, () => {});
+      if (pending === me && text.trim() && phase !== "done") tip = { text, unit };
+    } catch {
+      // ponytail: misslingt die Erklärung, geht die Lektion einfach ohne Folie weiter (der Fehler steht trotzdem in „Fehler melden“)
+    }
+    if (pending === me) pending = null;
+  }
+
+  /** Erklär-Folie mit dem fertigen Text, mit Beispiel und Merksatz. */
+  function slide({ text, unit }) {
     phase = "slide";
+    slideAt = Date.now();
     menuBtn.hidden = true;
     foot.hidden = false;
     mainBtn.textContent = "Weiter";
     setReady(true);
-    const live = h("div.markdown.typing", { "aria-live": "polite" });
-    const more = h("button.btn.secondary.slide-more", { type: "button", hidden: true }, icon("chat-circle-dots"), "Noch anders erklären");
-    body.replaceChildren(h("div.stack", h("p.q-kind", "Kurz erklärt"), h("h1.q-prompt", "Lass es uns anders versuchen"), live, more));
+    const more = h("button.btn.secondary.slide-more", {
+      type: "button",
+      onclick: () => openChat(unit, "", { shown: "Erklär es mir noch anders.", sent: `Du hast mir das gerade so erklärt:\n${text.slice(0, 900)}\n\nErkläre es mir noch einmal mit einem anderen Beispiel, in einfachen Worten.` }),
+    }, icon("chat-circle-dots"), "Noch anders erklären");
+    body.replaceChildren(h("div.stack", h("p.q-kind", "Kurz erklärt"), h("h1.q-prompt", "Lass es uns anders versuchen"), markdown(text), more));
     body.scrollTop = 0;
-    let unit = unitId;
-    if (unit == null && cur?.ex.id) unit = (await call("question", { questionId: cur.ex.id }).catch(() => null))?.unit_id ?? null;
-    // Anweisung zuerst: Der Kern kürzt lange Nachrichten am Ende.
-    const sent = `Erkläre mir den Stoff hinter diesen Fragen einfacher als im Skript: erst kurz das Prinzip, dann ein Beispiel aus dem Alltag. Schließe mit einer Zeile „**Merke:** …“. Diese Fragen habe ich gerade nacheinander falsch beantwortet:\n\n${items.join("\n\n")}`;
-    let text = "";
-    try {
-      text = await stream("ask", { unitId: unit, messages: [{ role: "user", content: sent }] }, (p) => {
-        text += p;
-        live.textContent = text;
-      });
-      live.replaceChildren(...markdown(text).childNodes);
-      more.hidden = false;
-      more.addEventListener("click", () =>
-        openChat(unit, "", { shown: "Erklär es mir noch anders.", sent: `Du hast mir das gerade so erklärt:\n${text.slice(0, 900)}\n\nErkläre es mir noch einmal mit einem anderen Beispiel, in einfachen Worten.` }),
-      );
-    } catch (e) {
-      live.textContent = String(e);
-    }
-    live.classList.remove("typing");
+    body.focus({ preventScroll: true });
+    if (!reduceMotion()) body.animate([{ opacity: 0, transform: "translateX(14px)" }, { opacity: 1, transform: "none" }], { duration: 200, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
   }
 
   // ---------- Frage bearbeiten / ausblenden ----------
@@ -734,7 +755,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     emit("stats", res.stats);
     const s = res.stats;
     const acc = Math.round((res.correct / Math.max(1, res.total)) * 100); // gezählt vom Server
-    const secs = Math.round((Date.now() - t0) / 1000);
+    const secs = Math.round((Date.now() - t0 - paused) / 1000);
     const grew = s.streak > streakBefore;
     const goalNow = s.xp_today >= s.goal && s.xp_today - res.xp < s.goal;
     const xpEl = h("b", "0");

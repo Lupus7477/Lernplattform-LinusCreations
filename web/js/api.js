@@ -52,7 +52,9 @@ async function http(cmd, args, onPiece) {
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buf = "";
   for (;;) {
-    const { value, done } = await reader.read();
+    const { value, done } = await reader.read().catch(() => {
+      throw "Die Verbindung zum Server ist abgebrochen.";
+    });
     if (done) throw "Die Verbindung zum Server ist abgebrochen.";
     buf += value;
     let i;

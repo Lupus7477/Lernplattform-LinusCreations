@@ -1140,9 +1140,12 @@ textarea.input {
   justify-content: flex-end;
   transition:
     opacity 200ms ease,
-    transform 200ms var(--ease-out);
+    transform 200ms var(--ease-out),
+    visibility 200ms;
 }
+/* visibility: sonst steht „0 in Folge“ unsichtbar im Text und Screenreader lesen es vor */
 .combo.hide {
+  visibility: hidden;
   opacity: 0;
   transform: scale(0.9);
 }
