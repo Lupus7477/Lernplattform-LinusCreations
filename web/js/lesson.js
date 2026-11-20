@@ -335,7 +335,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     const order = swot ? [0, 1, 2, 3].map((s) => slot.indexOf(s)) : ex.groups.map((_, i) => i);
     const zones = order.map((gi, pos) => {
       const list = h("div.zone-list");
-      const el = h("div.zone", { "data-tone": String(pos % 4) }, h("button.zone-head", { type: "button", "aria-label": `In „${ex.groups[gi]}“ legen` }, h("span.num", String(pos + 1)), ex.groups[gi]), list);
+      const el = h("div.zone", { "data-tone": String(pos % 4) }, h("button.zone-head", { type: "button" }, h("span.num", String(pos + 1)), " ", ex.groups[gi], h("span.visually-hidden", ", hier ablegen")), list);
       return { el, list, name: ex.groups[gi], cap: Infinity };
     });
     const bank = h("div.bank");
@@ -1028,7 +1028,8 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
       e.preventDefault();
       askClose();
     } else if (e.key === "Enter") {
-      if (e.target instanceof Element && e.target.closest(".feedback, .lesson-top, input, textarea, .piece, .zone-head, .slide-more")) return; // dort reagiert das Element selbst
+      // Dort reagiert das Element selbst. Eine noch nicht gewählte Kachel wählt Enter aus, erst die gewählte prüft.
+      if (e.target instanceof Element && e.target.closest('.feedback, .lesson-top, input, textarea, .piece, .zone-head, .slide-more, .tile[aria-pressed="false"]')) return;
       e.preventDefault();
       if (phase === "answer") check();
       else if (phase === "feedback") next();

@@ -153,6 +153,7 @@ export function openChat(unitId, title, seed) {
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      if (e.isComposing || e.keyCode === 229) return; // Enter bestätigt gerade eine IME-Eingabe (z. B. Japanisch), kein Absenden
       form.requestSubmit();
     }
   });

@@ -117,8 +117,8 @@ function calendar(active, frozen = []) {
     const future = d > today;
     cells.push(
       h(
-        `span.day${isOn ? ".on" : isIce ? ".frozen" : ""}${key === iso(today) ? ".today" : ""}`,
-        { title: d.toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }), style: future ? { opacity: "0.35" } : undefined, role: "img", "aria-label": `${d.toLocaleDateString("de-DE")}${isOn ? ", gelernt" : isIce ? ", Pausentag" : ""}` },
+        `span.day${isOn ? ".on" : isIce ? ".frozen" : ""}${key === iso(today) ? ".today" : ""}${future ? ".future" : ""}`,
+        { title: d.toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }), role: "img", "aria-label": `${d.toLocaleDateString("de-DE")}${isOn ? ", gelernt" : isIce ? ", Pausentag" : ""}` },
         isOn ? icon("fire-fill") : isIce ? icon("snowflake") : String(d.getDate()),
       ),
     );
@@ -213,7 +213,8 @@ function reminder(stats) {
   on.addEventListener("change", save);
   time.addEventListener("change", save);
   draw();
-  return h("div.field", h("div.row.between", h("label", { for: "remind", style: { "font-weight": "700" } }, "Lern-Erinnerung"), h("div.row", time, on)), hint);
+  // Uhrzeit + Schalter rutschen auf schmalen Handys (320 px) unter den Text statt seitlich überzustehen
+  return h("div.field", h("div.row.between", { style: { "flex-wrap": "wrap" } }, h("label", { for: "remind", style: { "font-weight": "700" } }, "Lern-Erinnerung"), h("div.row", time, on)), hint);
 }
 
 /** Version, Variante, Projekt und Rückmeldungen an die Entwickler. */

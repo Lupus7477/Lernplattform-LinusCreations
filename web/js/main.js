@@ -20,6 +20,9 @@ const TABS = [
   ["add", "plus-circle", "Hinzufügen"],
   ["profile", "user-circle", "Profil"],
 ];
+// Fenster-/Tab-Titel pro Ansicht: Screenreader sagen ihn beim Wechsel an, offene Tabs bleiben unterscheidbar
+const TITLES = { ...Object.fromEntries(TABS.map(([name, , label]) => [name, label])), unit: "Lernkarte" };
+const setTitle = (what) => (document.title = `${what} · Lernpfad`);
 
 let main;
 let topbar;
@@ -156,6 +159,7 @@ async function route() {
     const battleId = arg?.startsWith("battle-") ? Number(arg.slice(7)) : null;
     const base = battleId ? "battle" : arg === "review" || wrongCourse || examCourse ? "review" : "learn";
     if (mounted.name !== base) await show(base);
+    setTitle(battleId ? "Battle" : examCourse ? "Prüfungstraining" : base === "review" ? "Wiederholung" : "Lektion");
     lesson?.close();
     lesson = openLesson({ unitId: base === "learn" ? Number(arg) : null, wrongCourse, examCourse, battleId }, () => {
       lesson = null;
@@ -189,6 +193,7 @@ async function show(name, arg) {
   if (n !== showing) return el.cleanup?.();
   mounted = { name, arg, el };
   main.replaceChildren(el);
+  setTitle(TITLES[name]);
   const tab = name === "unit" ? "learn" : name;
   tabs.querySelectorAll(".tab").forEach((t) => (t.dataset.tab === tab ? t.setAttribute("aria-current", "page") : t.removeAttribute("aria-current")));
   if (!same) {

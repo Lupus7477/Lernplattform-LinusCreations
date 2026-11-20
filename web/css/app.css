@@ -136,6 +136,14 @@
 }
 html {
   -webkit-text-size-adjust: 100%;
+  /* Fokus nie hinter Kopf- oder Tab-Leiste (WCAG 2.4.11): beim Tabben scrollt der Browser um diese Höhe frei */
+  scroll-padding-top: calc(64px + env(safe-area-inset-top, 0px));
+  scroll-padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+}
+@media (min-width: 1024px) {
+  html {
+    scroll-padding-bottom: 0; /* Tabs stehen dann links */
+  }
 }
 body {
   margin: 0;
@@ -143,6 +151,7 @@ body {
   background: var(--paper);
   color: var(--ink);
   font: 400 1rem/1.55 var(--font-text);
+  overflow-wrap: break-word; /* lange Komposita („Kreuzpreiselastizität“) brechen statt die Seite zu verbreitern */
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
 }
@@ -306,6 +315,7 @@ main:focus,
   margin-inline: auto;
   padding-block: 8px 40px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr); /* sonst dehnt ein breiter Inhalt die Spalte über den Bildschirm */
   gap: 20px;
   align-content: start;
 }
@@ -594,6 +604,11 @@ main:focus,
   opacity: 0;
   cursor: pointer;
 }
+/* Die Auswahl ist unsichtbar, also trägt die Pille den Fokusring */
+.course-pill:has(select:focus-visible) {
+  outline: 3px solid var(--royal);
+  outline-offset: 3px;
+}
 
 .ring {
   --p: 0;
@@ -644,13 +659,13 @@ main:focus,
   transition: border-color 160ms ease;
 }
 .input:focus {
-  outline: none;
+  outline: 2px solid transparent; /* unsichtbar, aber im Kontrastmodus (forced colors) wird er zum Fokusring */
   border-color: var(--royal);
 }
 textarea.input {
   padding: 12px 14px;
   min-height: 52px;
-  resize: none;
+  resize: vertical; /* längere Antworten: Feld lässt sich größer ziehen */
   line-height: 1.45;
 }
 
@@ -1602,6 +1617,7 @@ textarea.input {
   border-bottom: 0;
 }
 .term .from {
+  min-height: 24px; /* eigene Zeile, kein Link im Satz: Mindestziel 24 px (WCAG 2.5.8) */
   font-size: 0.85rem;
   color: var(--ink-2);
 }
@@ -1692,6 +1708,16 @@ textarea.input {
 }
 .chat-form .btn {
   padding: 0 16px;
+}
+/* Frage wächst mit dem Text (eine Zeile leer, höchstens ein Drittel des Bildschirms); ohne field-sizing bleibt sie ziehbar */
+.chat-form textarea {
+  field-sizing: content;
+  max-height: 33dvh;
+}
+@supports (field-sizing: content) {
+  .chat-form textarea {
+    resize: none;
+  }
 }
 
 /* ---------- Hinzufügen ---------- */
@@ -1955,6 +1981,11 @@ textarea.input {
 .calendar .day.today {
   outline: 2px solid var(--royal);
   outline-offset: -2px;
+}
+/* Kommende Tage: gestrichelt statt verblasst, die Zahl bleibt lesbar */
+.calendar .day.future {
+  background: none;
+  border: 2px dashed var(--line);
 }
 .week {
   display: grid;
@@ -2347,6 +2378,7 @@ textarea.input {
   min-width: 0;
   hyphens: auto; /* „Schwächen“ passt auch auf 320 px */
   overflow-wrap: anywhere;
+  min-height: 24px; /* Tastaturweg ins Feld: Mindestziel (WCAG 2.5.8) */
   padding: 2px;
   border: 0;
   background: none;
@@ -2890,6 +2922,27 @@ textarea.input {
     .lesson {
       transform: none;
     }
+  }
+}
+/* ---------- Kontrastmodus (Windows) ---------- */
+/* Dort fallen Hintergründe und box-shadow weg: Knöpfe brauchen einen Rahmen, Auswahl und Fortschritt eine Systemfarbe */
+@media (forced-colors: active) {
+  :is(.btn, .tile, .piece, .icon-btn, .segmented button, .zone-head, .node, .switch) {
+    border: 2px solid ButtonText;
+  }
+  :is(.tile, .piece, .segmented button, .gallery button, .hint-chip)[aria-pressed="true"],
+  .tab[aria-current="page"],
+  .switch:checked,
+  .bar > i,
+  .progress > i {
+    background: Highlight;
+    color: HighlightText;
+  }
+  .switch::after {
+    background: ButtonText;
+  }
+  .switch:checked::after {
+    background: HighlightText;
   }
 }
 @media (prefers-reduced-transparency: reduce) {
