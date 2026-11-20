@@ -1,8 +1,8 @@
 // Profil: Streak, Kalender, Woche, Einstellungen, Konto/Server, KI, Über & Version.
 import { call } from "./api.js";
 import { PASSWORD_RULES } from "./auth.js";
-import { applyTheme, confirmSheet, gb, h, icon, openExternal, openSheet, pref, segmented, toast } from "./ui.js";
-import { aiNotice, currentCourse, emit, loadStats, state, subscribe } from "./state.js";
+import { applyTheme, confirmSheet, h, icon, openExternal, openSheet, pref, segmented, toast } from "./ui.js";
+import { aiNotice, aiProgress, currentCourse, emit, loadStats, state, subscribe } from "./state.js";
 import { appInfo, fail, openReport } from "./report.js";
 import { canRemind, reminderTime, setReminder } from "./remind.js";
 
@@ -244,7 +244,7 @@ function aiCard(tiers) {
   const onServer = state.session?.mode === "server";
   const canPick = !onServer || state.session.user?.admin;
   const line =
-    ai?.state === "ready" ? (ai.loaded ? "Bereit und gerade im Speicher." : "Bereit. Ruht, bis du sie brauchst.") : ai?.state === "downloading" ? `Wird geladen: ${gb(ai.done)} von ${gb(ai.total)} GB` : ai?.state === "error" ? "Nicht verfügbar." : ai?.state === "missing" ? "Noch nicht heruntergeladen." : "Wird vorbereitet.";
+    ai?.state === "ready" ? (ai.loaded ? "Bereit und gerade im Speicher." : "Bereit. Ruht, bis du sie brauchst.") : ai?.state === "downloading" ? h("span", "Wird geladen: ", aiProgress(ai)) : ai?.state === "error" ? "Nicht verfügbar." : ai?.state === "missing" ? "Noch nicht heruntergeladen." : "Wird vorbereitet.";
   return h(
     "div.card",
     h("h2", onServer ? "KI auf dem Server" : "KI auf diesem Gerät"),

@@ -8,6 +8,7 @@ pub mod learn;
 pub mod motivation;
 pub mod report;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -25,6 +26,9 @@ pub const LOCAL: Who = Who { id: 1, admin: true };
 pub struct Core {
     pub db: db::Db,
     pub ai: Arc<Ai>,
+    /// Wer gerade eine Zuordnen-Runde bekommen hat: `finish_lesson` zählt `matched` nur einmal je ausgegebener Runde.
+    // ponytail: nur im Speicher, nach einem Neustart verfällt eine offene Runde ohne Bonus
+    pub(crate) matches: Mutex<HashSet<i64>>,
     wake: mpsc::Sender<()>,
 }
 
@@ -54,7 +58,7 @@ impl Core {
             ai.check();
         }
         import::spawn_worker(db.clone(), ai.clone(), wake_rx, on_course);
-        Ok(Core { db, ai, wake })
+        Ok(Core { db, ai, matches: Mutex::default(), wake })
     }
 
     pub fn wake(&self) {

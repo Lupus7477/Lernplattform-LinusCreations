@@ -1091,6 +1091,7 @@ fn start_lesson(c: &Core, who: &Who, unit_id: Option<i64>, wrong_course: Option<
         if terms.len() >= 3 {
             let at = exercises.len().min(3);
             exercises.insert(at, Exercise { kind: "match".into(), prompt: "Ordne die Begriffe zu".into(), pairs: terms, ..Default::default() });
+            c.matches.lock().unwrap().insert(who.id);
         }
     }
     Ok(LessonOut { ready: true, failed: false, exercises, boost, cheers: motivation::picks(&conn, &motivation::names(&conn, scope), "boost", 3) })
@@ -1380,6 +1381,8 @@ struct Part {
 // ponytail: Erstantworten einer abgestürzten Lektion zählen in der nächsten mit. Eine Lektions-ID, falls das stört.
 fn finish_lesson(c: &Core, who: &Who, unit_id: Option<i64>, course_id: Option<i64>, best_run: i64, matched: Option<bool>, partial: bool) -> R<Finished> {
     let conn = c.db.lock().unwrap();
+    // Alles oder nichts: Die Antworten werden erst verbraucht, wenn auch Lektion, XP und Erfolge gespeichert sind
+    let tx = conn.unchecked_transaction().map_err(err)?;
     let main = match unit_id {
         Some(id) => Some(unit_role(&conn, who, id)?.0),
         None => visible_course(&conn, who, course_id),
@@ -1403,7 +1406,8 @@ fn finish_lesson(c: &Core, who: &Who, unit_id: Option<i64>, course_id: Option<i6
             Some(i) => parts.swap(0, i),
             None => parts.insert(0, Part { course: m, correct: 0, total: 0 }),
         }
-        if let Some(ok) = matched {
+        // Nur eine ausgegebene Runde zählt, und nur einmal
+        if let Some(ok) = matched.filter(|_| c.matches.lock().unwrap().remove(&who.id)) {
             parts[0].total += 1;
             parts[0].correct += ok as i64;
         }
@@ -1500,6 +1504,7 @@ fn finish_lesson(c: &Core, who: &Who, unit_id: Option<i64>, course_id: Option<i6
         Some(cid) => recommend(&conn, who, cid, unit_id)?,
         None => None,
     };
+    tx.commit().map_err(err)?;
     Ok(Finished { xp, course_xp, correct, total, stats, level_up, badges, before, next, cheer })
 }
 
@@ -2152,7 +2157,7 @@ mod tests {
     fn core(dir: &std::path::Path) -> Core {
         let conn = db::open(&dir.join("lernen.db")).unwrap();
         let (wake, _) = mpsc::channel();
-        Core { db: Arc::new(Mutex::new(conn)), ai: crate::Ai::new(dir.join("models"), "kompakt", Box::new(|_| {})), wake }
+        Core { db: Arc::new(Mutex::new(conn)), ai: crate::Ai::new(dir.join("models"), "kompakt", Box::new(|_| {})), matches: Mutex::default(), wake }
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {
@@ -2834,9 +2839,13 @@ mod tests {
         let mine = run(&c, &crate::LOCAL, "stats", json!({ "courseId": course })).unwrap();
         assert_eq!(mine["level"], 3);
         // Runde ohne Einheit (nur die Zuordnen-Runde) zählt in der Kurs-Bestenliste
+        c.matches.lock().unwrap().insert(crate::LOCAL.id); // wie von start_lesson ausgegeben
         run(&c, &crate::LOCAL, "finish_lesson", json!({ "matched": true, "courseId": 11 })).unwrap();
         let board = run(&c, &crate::LOCAL, "leaderboard", json!({ "courseId": 11 })).unwrap();
         assert_eq!(board[0]["xp"], learn::lesson_xp(1, 1, true));
+        // Dieselbe Runde noch einmal melden (oder eine nie ausgegebene): keine XP
+        let again = run(&c, &crate::LOCAL, "finish_lesson", json!({ "matched": true, "courseId": 11 })).unwrap();
+        assert_eq!((again["xp"].as_i64(), again["total"].as_i64()), (Some(0), Some(0)));
     }
 
     #[test]

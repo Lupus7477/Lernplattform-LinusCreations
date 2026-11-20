@@ -45,7 +45,11 @@ async function http(cmd, args, onPiece) {
     const e = await res.json().catch(() => ({}));
     throw { locked: Number(e.retry_after || res.headers.get("retry-after") || 30), message: e.error || "Zu viele Versuche." };
   }
-  if (!res.ok) throw (await res.text()) || `Fehler ${res.status}`;
+  if (!res.ok) {
+    const body = await res.text();
+    // Der eigene Server antwortet mit Text; eine HTML-Fehlerseite (Proxy: 502, 503 …) ist keine Meldung für Nutzer
+    throw body && !body.trimStart().startsWith("<") ? body : `Der Server antwortet gerade nicht (Fehler ${res.status}). Versuch es gleich noch einmal.`;
+  }
   if (!onPiece) return res.json();
 
   // NDJSON: {"t": Stück} … dann {"ok": Ergebnis} oder {"err": Meldung}

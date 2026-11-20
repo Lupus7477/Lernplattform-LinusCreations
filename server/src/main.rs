@@ -6,7 +6,7 @@ mod auth;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,12 +64,16 @@ struct Srv {
     /// Schon automatisch gemeldete Programmfehler (Schlüssel → Nummer, Link), damit jeder nur ein Issue bekommt
     // ponytail: nur bis zum Neustart. Danach kann derselbe Fehler ein zweites Issue bekommen; GitHub-Suche, falls das stört.
     reported: Mutex<HashMap<String, (i64, String)>>,
+    /// Konten mit einer laufenden KI-Antwort (`explain`/`ask`): eine je Konto, sonst füllt ein Konto den Blocking-Pool
+    streaming: Mutex<HashSet<i64>>,
 }
 
 /// Meldungen an GitHub pro Konto und Stunde (selbst geschrieben oder automatisch)
 const POSTS_PER_HOUR: usize = 5;
 /// KI-Aufrufe für Meldungen (Einschätzen, Entwurf) pro Konto und Stunde: das Modell soll für die Vorbereitung frei bleiben
 const DRAFTS_PER_HOUR: usize = 30;
+/// „Erklären“ und „Frag die KI“ pro Konto und Stunde
+const ASKS_PER_HOUR: usize = 100;
 
 /// Zählt Aufrufe je Konto und Art in einem gleitenden Stundenfenster.
 #[derive(Default)]
@@ -222,6 +226,7 @@ async fn run() -> Result<(), String> {
         github_token,
         hourly: Hourly::default(),
         reported: Mutex::new(HashMap::new()),
+        streaming: Mutex::default(),
     });
     let app = Router::new()
         .route("/api/rpc/{cmd}", post(rpc))
@@ -467,11 +472,31 @@ async fn issue(s: &Arc<Srv>, who: Who, cmd: &str, mut args: Value) -> Response {
     core_result(res)
 }
 
+/// Gibt das Konto in `streaming` wieder frei, auch wenn die Antwort mit einem Fehler endet.
+struct Streaming(Arc<Srv>, i64);
+
+impl Drop for Streaming {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.0.streaming.lock() {
+            m.remove(&self.1);
+        }
+    }
+}
+
 /// `explain`/`ask`: NDJSON, je Zeile `{"t": Stück}`, zum Schluss `{"ok": Ergebnis}` oder `{"err": Meldung}`.
+// ponytail: bricht der Client ab, schreibt das Modell trotzdem zu Ende (on_token kann nicht abbrechen). Eine Antwort je Konto begrenzt das.
 fn stream_call(s: &Arc<Srv>, who: Who, cmd: String, args: Value) -> Response {
+    if !s.streaming.lock().unwrap().insert(who.id) {
+        return too_many("Die KI antwortet dir gerade schon. Warte, bis sie fertig ist.", 5);
+    }
+    let busy = Streaming(s.clone(), who.id);
+    if let Err(secs) = s.hourly.take(who.id, "ask", ASKS_PER_HOUR) {
+        return too_many("Du hast die KI in der letzten Stunde sehr oft gefragt. Versuch es später noch einmal.", secs);
+    }
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let core = s.core.clone();
     tokio::task::spawn_blocking(move || {
+        let _busy = busy;
         let res = api::call(&core, &who, &cmd, args, &mut |p| {
             let _ = tx.send(format!("{}\n", json!({ "t": p })));
         });

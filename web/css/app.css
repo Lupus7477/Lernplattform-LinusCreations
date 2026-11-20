@@ -2770,7 +2770,7 @@ textarea.input {
   justify-content: center;
   gap: 8px;
 }
-.badge {
+.badge-row .badge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2782,13 +2782,13 @@ textarea.input {
   font-weight: 700;
   animation: pop 320ms var(--ease-out) both;
 }
-.badge:nth-child(2) {
+.badge-row .badge:nth-child(2) {
   animation-delay: 80ms;
 }
-.badge:nth-child(n + 3) {
+.badge-row .badge:nth-child(n + 3) {
   animation-delay: 160ms;
 }
-.badge .icon {
+.badge-row .badge .icon {
   width: 18px;
   height: 18px;
   color: var(--marker-ink);

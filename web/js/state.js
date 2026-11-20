@@ -52,6 +52,16 @@ export async function loadStats() {
 }
 
 /** Hinweis, solange die KI nicht bereit ist. Leer, wenn alles läuft. */
+/** „0,4 von 1,3 GB“ als eigener Knoten, den `setAiProgress` austauscht. */
+export const aiProgress = (ai) => h("span.ai-progress", progressText(ai));
+const progressText = (ai) => `${gb(ai.done || 0)} von ${gb(ai.total || 1)} GB`;
+
+/** Während des Downloads ändert sich nur der Fortschritt: Zahl und Balken tauschen, statt die Seiten neu zu bauen (sonst gehen Eingaben verloren). */
+export function setAiProgress(ai) {
+  document.querySelectorAll(".ai-progress").forEach((el) => (el.textContent = progressText(ai)));
+  document.querySelectorAll(".ai-bar").forEach((el) => el.style.setProperty("--p", String((ai.done || 0) / (ai.total || 1))));
+}
+
 export function aiNotice(ai = state.ai) {
   if (!ai || ai.state === "ready") return null;
   if (ai.state === "error") {
@@ -83,7 +93,7 @@ export function aiNotice(ai = state.ai) {
     { role: "status" },
     icon("download-simple"),
     h("b", "Die KI wird eingerichtet"),
-    h("span.muted.num", ai.state === "downloading" ? `${gb(done)} von ${gb(total)} GB. Einmalig, danach läuft alles offline auf diesem Gerät.` : "Einen Moment, gleich geht es los."),
-    h("div.bar", h("i", { style: { "--p": String(done / total) } })),
+    ai.state === "downloading" ? h("span.muted.num", aiProgress(ai), ". Einmalig, danach läuft alles offline auf diesem Gerät.") : h("span.muted.num", "Einen Moment, gleich geht es los."),
+    h("div.bar", h("i.ai-bar", { style: { "--p": String(done / total) } })),
   );
 }

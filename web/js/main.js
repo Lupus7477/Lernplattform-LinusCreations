@@ -1,6 +1,6 @@
-import { call, on } from "./api.js";
+import { call, message, on } from "./api.js";
 import { applyTheme, h, icon } from "./ui.js";
-import { currentCourse, emit, loadCourses, loadStats, selectCourse, state, subscribe } from "./state.js";
+import { currentCourse, emit, loadCourses, loadStats, selectCourse, setAiProgress, state, subscribe } from "./state.js";
 import * as path from "./path.js";
 import * as review from "./review.js";
 import * as add from "./import.js";
@@ -9,7 +9,7 @@ import * as unit from "./unit.js";
 import * as battle from "./battle.js";
 import { openLesson } from "./lesson.js";
 import * as auth from "./auth.js";
-import { appInfo, bootReport } from "./report.js";
+import { appInfo, bootReport, fail } from "./report.js";
 import { syncReminder } from "./remind.js";
 
 const views = { learn: path, review, add, profile, unit, battle };
@@ -36,7 +36,9 @@ async function servedByLernpfad() {
 async function boot() {
   applyTheme();
   const sprite = fetch("icons.svg").then((r) => r.text());
-  if (!window.__TAURI__ && !(await servedByLernpfad())) await import("../dev/mock-tauri.js");
+  // Beispieldaten nur bei der Entwicklung auf diesem Rechner: Ein echter Server mit 502/503 soll einen Fehler zeigen, keine Fake-Kurse
+  const dev = ["localhost", "127.0.0.1"].includes(location.hostname);
+  if (!window.__TAURI__ && dev && !(await servedByLernpfad())) await import("../dev/mock-tauri.js");
   document.body.insertAdjacentHTML("afterbegin", await sprite);
 
   try {
@@ -69,7 +71,9 @@ async function boot() {
   });
 
   on("ai-status", (s) => {
+    const progress = s.state === "downloading" && state.ai?.state === "downloading" && s.tier === state.ai.tier;
     state.ai = s;
+    if (progress) return setAiProgress(s); // pro Prozent ein Ereignis: nicht jedes Mal Hinzufügen, Lernen und Profil neu bauen
     emit("ai", s);
   });
   let pending;
@@ -167,10 +171,22 @@ async function route() {
   await show(name, arg);
 }
 
+let showing = 0;
 async function show(name, arg) {
+  const n = ++showing;
   const same = mounted.name === name && mounted.arg === arg;
   mounted.el?.cleanup?.();
-  const el = await views[name].render(arg);
+  mounted.el = null;
+  let el;
+  try {
+    el = await views[name].render(arg);
+  } catch (e) {
+    fail(e); // Toast mit „Melden“ wie bei jedem anderen Fehler
+    const retry = h("button.btn.secondary", { type: "button", onclick: () => show(name, arg) }, icon("arrow-clockwise"), "Erneut versuchen");
+    el = h("div.page", h("div.notice.error", { role: "alert" }, icon("warning"), h("b", "Diese Seite konnte nicht geladen werden"), h("span.muted", message(e)), h("div.actions", retry)));
+  }
+  // Inzwischen schon woanders hin: die langsamere Ansicht darf die neuere nicht überdecken
+  if (n !== showing) return el.cleanup?.();
   mounted = { name, arg, el };
   main.replaceChildren(el);
   const tab = name === "unit" ? "learn" : name;
