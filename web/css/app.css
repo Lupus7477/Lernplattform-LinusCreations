@@ -35,6 +35,7 @@
   --marker-ink: #8a6700;
   --ember: #f2650a;
   --ember-soft: #ffe7d6;
+  --ember-ink: #ad4500; /* Ember als Text: 5,2:1 auf Paper (--ember nur 2,9:1) */
   --right: #12855a;
   --right-lip: #0b6342;
   --right-soft: #dcf5e9;
@@ -83,6 +84,7 @@
     --marker-ink: #ffd83a;
     --ember: #ff8b42;
     --ember-soft: #3b2517;
+    --ember-ink: #ff8b42;
     --right: #3dcb8d;
     --right-lip: #1c8a5a;
     --right-soft: #13352a;
@@ -113,6 +115,7 @@
   --marker-ink: #ffd83a;
   --ember: #ff8b42;
   --ember-soft: #3b2517;
+  --ember-ink: #ff8b42;
   --right: #3dcb8d;
   --right-lip: #1c8a5a;
   --right-soft: #13352a;
@@ -1144,7 +1147,7 @@ textarea.input {
   align-items: center;
   gap: 4px;
   font: 800 0.95rem/1 var(--font-text);
-  color: var(--ember);
+  color: var(--ember-ink);
   min-width: 52px;
   justify-content: flex-end;
   transition:
@@ -1385,18 +1388,6 @@ textarea.input {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-}
-.bank .tile {
-  width: auto;
-  min-height: 50px;
-  padding: 10px 16px;
-}
-.bank .tile.used {
-  color: transparent;
-  background: var(--line);
-  border-color: var(--line);
-  box-shadow: none;
-  pointer-events: none;
 }
 
 .match {

@@ -371,6 +371,24 @@ export function markdown(text) {
   return el;
 }
 
+// ---------- Modale Ebenen (Sheets, Lektion) ----------
+// Alles hinter der obersten Ebene ist inert: Tab, Klicks und Screenreader bleiben im Dialog.
+// Toasts bleiben bedienbar („Melden“), Scrims auch (Klick daneben schließt).
+const layers = [];
+function syncInert() {
+  const top = layers.at(-1);
+  for (const el of document.body.children) el.inert = !!top && el !== top && !el.matches(".toasts, .scrim");
+}
+export function pushLayer(el) {
+  layers.push(el);
+  syncInert();
+}
+export function popLayer(el) {
+  const i = layers.indexOf(el);
+  if (i >= 0) layers.splice(i, 1);
+  syncInert();
+}
+
 // ---------- Bottom-Sheet mit Wisch-zum-Schließen ----------
 export function openSheet({ title, body, foot, label, onClose }) {
   const before = document.activeElement;
@@ -379,6 +397,7 @@ export function openSheet({ title, body, foot, label, onClose }) {
   const head = h("div.sheet-head", h("h2", title), closeBtn);
   const sheet = h("section.sheet", { role: "dialog", "aria-modal": "true", "aria-label": label || title }, head, h("div.sheet-body", body), foot ? h("div.sheet-foot", foot) : null);
   document.body.append(scrim, sheet);
+  pushLayer(sheet);
   requestAnimationFrame(() => {
     scrim.classList.add("open");
     sheet.classList.add("open");
@@ -397,11 +416,13 @@ export function openSheet({ title, body, foot, label, onClose }) {
       sheet.remove();
       scrim.remove();
     }, 220);
+    popLayer(sheet); // vor dem Fokus: was dahinter liegt, ist sonst noch inert
     before?.focus?.({ preventScroll: true });
     onClose?.();
   }
   function onKey(e) {
-    if (e.key === "Escape") {
+    // Gestapelte Sheets: nur das oberste schließt
+    if (e.key === "Escape" && layers.at(-1) === sheet) {
       e.stopPropagation();
       close();
     }

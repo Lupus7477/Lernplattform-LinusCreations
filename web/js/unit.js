@@ -1,5 +1,5 @@
 // Lernkarte einer Einheit: Zusammenfassung, Begriffe, Fragen, ausführliche Erklärung, „Frag die KI“.
-import { call, stream } from "./api.js";
+import { call, message, stream } from "./api.js";
 import { docName, h, icon, markdown, openSheet, segmented, toast, zoomable } from "./ui.js";
 import { state } from "./state.js";
 import { fail } from "./report.js";
@@ -12,7 +12,7 @@ export async function render(id) {
   if (u.explanation) showExplanation(u.explanation);
   else {
     const btn = h("button.btn.secondary", { type: "button" }, icon("sparkle"), "Ausführlich erklären");
-    btn.addEventListener("click", () => explain(u.id, explainBox, showExplanation));
+    btn.addEventListener("click", () => explain(u.id, explainBox));
     explainBox.append(btn);
   }
 
@@ -71,29 +71,31 @@ function orgaNote(u, mine) {
   );
 }
 
-async function explain(unitId, box, done) {
+async function explain(unitId, box) {
   if (state.ai?.state !== "ready") {
     box.replaceChildren(h("p.muted", aiMissing() ?? "Die KI wird noch eingerichtet. Sobald der Download fertig ist, kann sie erklären."));
     return;
   }
   let text = "";
-  const live = h("div.markdown.typing", { "aria-live": "polite" });
+  // aria-busy: Screenreader lesen erst den fertigen Text vor, nicht jeden Zwischenstand
+  const live = h("div.markdown.typing", { "aria-live": "polite", "aria-busy": "true" });
   box.replaceChildren(h("h2", "Ausführlich erklärt"), live);
-  let queued = false;
+  let timer = null;
   try {
     const final = await stream("explain", { unitId }, (piece) => {
       text += piece;
-      if (queued) return;
-      queued = true;
       // Markdown nur ~8× pro Sekunde neu setzen statt bei jedem Token
-      setTimeout(() => {
-        queued = false;
+      timer ??= setTimeout(() => {
+        timer = null;
         live.replaceChildren(...markdown(text).childNodes);
       }, 120);
     });
-    done(final);
+    clearTimeout(timer);
+    live.classList.remove("typing");
+    live.replaceChildren(...markdown(final).childNodes);
+    live.removeAttribute("aria-busy");
   } catch (e) {
-    box.replaceChildren(h("p.muted", String(e)));
+    box.replaceChildren(h("p.muted", message(e)));
   }
 }
 
@@ -124,6 +126,7 @@ export function openChat(unitId, title, seed) {
       return;
     }
     let text = "";
+    list.setAttribute("aria-busy", "true"); // erst die fertige Antwort vorlesen
     try {
       text = await stream("ask", { unitId, messages: msgs }, (p) => {
         text += p;
@@ -133,9 +136,10 @@ export function openChat(unitId, title, seed) {
       bubble.replaceChildren(...markdown(text).childNodes);
       msgs.push({ role: "assistant", content: text });
     } catch (e) {
-      bubble.textContent = String(e);
+      bubble.textContent = message(e);
     }
     bubble.classList.remove("typing");
+    list.removeAttribute("aria-busy");
     send.disabled = false;
   }
 
@@ -170,7 +174,7 @@ function questionList(unitId, shared) {
     try {
       qs = await call("unit_questions", { unitId });
     } catch (e) {
-      return list.replaceChildren(h("p.muted", String(e)));
+      return list.replaceChildren(h("p.muted", message(e)));
     }
     const add = h("button.btn.secondary", { type: "button", onclick: () => editQuestion({ unit_id: unitId, kind: null, shared, options: [], groups: [], spots: [] }, draw) }, icon("plus-circle"), "Aufgabe hinzufügen");
     if (!qs.length) return list.replaceChildren(h("p.muted", "Noch keine Fragen. Sie entstehen, sobald du die erste Lektion startest."), add);
@@ -328,7 +332,7 @@ export function editQuestion(q, onSaved) {
       toast(q.shared ? "Gespeichert. Gilt für alle im Kurs." : "Gespeichert.");
       onSaved?.(saved);
     } catch (e) {
-      fail(String(e));
+      fail(message(e));
       save.disabled = false;
     }
   });
@@ -534,7 +538,7 @@ function figureEditor(q, sameKind) {
         ),
       );
     } catch (e) {
-      gallery.replaceChildren(h("p.muted", String(e)));
+      gallery.replaceChildren(h("p.muted", message(e)));
     }
   };
   const source = segmented([["pdf", "Aus dem Skript"], ["own", "Eigenes Bild"]], "pdf", (v) => (v === "own" ? file.click() : loadGallery()), "Bildquelle");

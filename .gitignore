@@ -10,11 +10,6 @@
 *.dylib
 *.bin
 
-# === Go Build Output ===
-/cmd/server/server
-/lernplattform
-__debug_bin*
-
 # === Database (WICHTIG!) ===
 *.db
 *.db-journal
@@ -47,11 +42,6 @@ uploads/
 # === Logs ===
 *.log
 logs/
-
-# === Test Coverage ===
-coverage.out
-coverage.html
-*.coverprofile
 
 # === Dependencies ===
 /vendor/

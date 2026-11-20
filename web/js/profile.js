@@ -1,5 +1,5 @@
 // Profil: Streak, Kalender, Woche, Einstellungen, Konto/Server, KI, Über & Version.
-import { call } from "./api.js";
+import { call, message } from "./api.js";
 import { PASSWORD_RULES } from "./auth.js";
 import { applyTheme, confirmSheet, h, icon, openExternal, openSheet, pref, segmented, toast } from "./ui.js";
 import { aiNotice, aiProgress, currentCourse, emit, loadStats, state, subscribe } from "./state.js";
@@ -84,7 +84,7 @@ function badgeCard(badges, course) {
       list.map((b) =>
         h(
           `div.badge-tile${b.at ? "" : ".locked"}`,
-          { "aria-label": `${b.title}: ${b.at ? "freigeschaltet" : b.desc}` },
+          { role: "img", "aria-label": `${b.title}: ${b.at ? "freigeschaltet" : b.desc}` },
           icon(b.icon),
           h("b", b.title),
           h("span", b.at ? `Seit ${new Date(b.at * 1000).toLocaleDateString("de-DE")}` : b.desc),
@@ -118,7 +118,7 @@ function calendar(active, frozen = []) {
     cells.push(
       h(
         `span.day${isOn ? ".on" : isIce ? ".frozen" : ""}${key === iso(today) ? ".today" : ""}`,
-        { title: d.toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }), style: future ? { opacity: "0.35" } : undefined, "aria-label": `${d.toLocaleDateString("de-DE")}${isOn ? ", gelernt" : isIce ? ", Pausentag" : ""}` },
+        { title: d.toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }), style: future ? { opacity: "0.35" } : undefined, role: "img", "aria-label": `${d.toLocaleDateString("de-DE")}${isOn ? ", gelernt" : isIce ? ", Pausentag" : ""}` },
         isOn ? icon("fire-fill") : isIce ? icon("snowflake") : String(d.getDate()),
       ),
     );
@@ -376,7 +376,7 @@ function changePassword() {
       s.close();
       toast("Passwort geändert. Andere Geräte sind abgemeldet.");
     } catch (e) {
-      err.textContent = e?.locked ? "Zu viele Fehlversuche. Versuch es in ein paar Minuten noch einmal." : String(e?.message || e);
+      err.textContent = e?.locked ? "Zu viele Fehlversuche. Versuch es in ein paar Minuten noch einmal." : message(e);
       err.hidden = false;
       save.disabled = false;
     }
@@ -406,7 +406,7 @@ function deleteAccount() {
       if (state.session.remote) await call("server_disconnect").catch(() => {});
       location.replace(location.pathname);
     } catch (e) {
-      err.textContent = e?.locked ? "Zu viele Fehlversuche. Versuch es in ein paar Minuten noch einmal." : String(e?.message || e);
+      err.textContent = e?.locked ? "Zu viele Fehlversuche. Versuch es in ein paar Minuten noch einmal." : message(e);
       err.hidden = false;
       go.disabled = false;
     }
@@ -503,7 +503,7 @@ function connectCard() {
       await call("server_connect", { link: link.value.trim(), name: name.value.trim(), password: password.value });
       location.reload();
     } catch (e) {
-      err.textContent = e?.locked ? "Zu viele Fehlversuche. Versuch es in ein paar Minuten noch einmal." : String(e?.message || e);
+      err.textContent = e?.locked ? "Zu viele Fehlversuche. Versuch es in ein paar Minuten noch einmal." : message(e);
       err.hidden = false;
       go.disabled = false;
     }

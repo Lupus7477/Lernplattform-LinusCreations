@@ -44,7 +44,7 @@ async function boot() {
   try {
     state.session = await call("session");
   } catch (e) {
-    if (window.__TAURI__) return offline(String(e?.message || e)); // App mit Server verbunden, Server weg
+    if (window.__TAURI__) return offline(message(e)); // App mit Server verbunden, Server weg
     throw e;
   }
   // Server ohne gültige Sitzung: nur die Anmeldung, keine Daten.
@@ -132,10 +132,10 @@ function renderTopbar() {
   topbar.replaceChildren(
     courseEl,
     h("span.spacer"),
-    h("span.chip.streak" + (s.streak ? "" : ".off"), { "aria-label": `Streak: ${s.streak} ${s.streak === 1 ? "Tag" : "Tage"}` }, icon("fire-fill"), h("span.num", String(s.streak))),
+    h("span.chip.streak" + (s.streak ? "" : ".off"), { role: "img", "aria-label": `Streak: ${s.streak} ${s.streak === 1 ? "Tag" : "Tage"}` }, icon("fire-fill"), h("span.num", String(s.streak))),
     h(
       "span.chip",
-      { "aria-label": `Heute ${s.xp_today} von ${s.goal} XP`, title: `Tagesziel: heute ${s.xp_today} von ${s.goal} XP über alle Kurse, beginnt um 0 Uhr neu` },
+      { role: "img", "aria-label": `Heute ${s.xp_today} von ${s.goal} XP`, title: `Tagesziel: heute ${s.xp_today} von ${s.goal} XP über alle Kurse, beginnt um 0 Uhr neu` },
       h("span.ring", { style: { "--p": String(p) } }),
       h("span.num", `${s.xp_today}/${s.goal} XP`),
     ),

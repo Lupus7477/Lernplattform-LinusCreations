@@ -1,6 +1,6 @@
 // Lektion: eine Aufgabe nach der anderen, Prüfen ohne KI, falsche Aufgaben kommen am Ende erneut.
-import { call, stream } from "./api.js";
-import { confetti, confirmSheet, countUp, flip, h, icon, markdown, openSheet, pref, reduceMotion, shake, sound, toast, zoomable } from "./ui.js";
+import { call, message as errorText, stream } from "./api.js";
+import { confetti, confirmSheet, countUp, flip, h, icon, markdown, openSheet, popLayer, pref, pushLayer, reduceMotion, shake, sound, toast, zoomable } from "./ui.js";
 import { emit, state, subscribe } from "./state.js";
 import { editQuestion, openChat } from "./unit.js";
 import { fail, openReport } from "./report.js";
@@ -36,7 +36,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   const fill = h("i");
   const progress = h("div.progress", { role: "progressbar", "aria-label": "Fortschritt der Lektion", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": "0" }, fill);
   const combo = h("span.combo.hide", { "aria-live": "polite" });
-  const rival = h("span.chip.rival", { hidden: true });
+  const rival = h("span.chip.rival", { hidden: true, role: "img" });
   const closeBtn = h("button.icon-btn", { type: "button", "aria-label": "Lektion beenden" }, icon("x"));
   const menuBtn = h("button.icon-btn", { type: "button", "aria-label": "Diese Frage merken, bearbeiten, ausblenden oder melden", hidden: true }, icon("dots-three"));
   const body = h("div.lesson-body", { tabindex: "-1" });
@@ -44,7 +44,9 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   const foot = h("div.lesson-foot", h("div.inner", mainBtn));
   const fb = h("div.feedback", { "aria-live": "assertive" });
   const root = h("div.lesson", { role: "dialog", "aria-modal": "true", "aria-label": battleId ? "Battle" : unitId ? "Lektion" : examCourse ? "Prüfungstraining" : "Wiederholung" }, h("div.lesson-top", closeBtn, progress, combo, rival, menuBtn), body, foot, fb);
+  const before = document.activeElement;
   document.body.append(root);
+  pushLayer(root);
   document.body.style.overflow = "hidden";
 
   let queue = [];
@@ -817,7 +819,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     try {
       res = await call("start_lesson", { unitId, wrongCourse, examCourse });
     } catch (e) {
-      return message("warning", "Die Lektion konnte nicht starten", String(e));
+      return message("warning", "Die Lektion konnte nicht starten", errorText(e));
     }
     if (res.failed) {
       return message("warning", "Fragen konnten nicht erstellt werden", "Die KI hat für diesen Abschnitt keine brauchbaren Fragen geliefert.", [
@@ -869,7 +871,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     try {
       b = await call("battle", { battleId, exercises: true });
     } catch (e) {
-      return message("warning", "Battle nicht gefunden", String(e));
+      return message("warning", "Battle nicht gefunden", errorText(e));
     }
     onBattle(b);
     poll ??= setInterval(battleTick, 1500);
@@ -890,7 +892,7 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
   }
 
   async function battleTick() {
-    if (ticking) return; // langsame Antwort: keine zweite Abfrage obendrauf
+    if (ticking || document.hidden) return; // langsame Antwort: keine zweite Abfrage obendrauf; Tab im Hintergrund: erst beim Zurückkommen
     ticking = true;
     const was = battle?.state;
     const b = await call("battle", { battleId }).catch(() => null);
@@ -1050,6 +1052,9 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     document.removeEventListener("keydown", onKey);
     document.body.style.overflow = "";
     root.remove();
+    popLayer(root);
+    // Zurück zum Auslöser; ist der inzwischen neu gezeichnet, an den Seitenanfang statt ins Leere (body)
+    (before?.isConnected ? before : document.querySelector("main"))?.focus({ preventScroll: true });
   }
   function exit() {
     close();

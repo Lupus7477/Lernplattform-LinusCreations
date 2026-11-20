@@ -711,7 +711,7 @@ function editCourse(c) {
       picker = peoplePicker(await call("share_people", { courseId: c.id }));
       slot.replaceChildren(picker.el, h("div.row.between", h("label", { for: "edit-invite" }, "Mitglieder dürfen weitere Personen einladen"), invite));
     } catch (e) {
-      slot.replaceChildren(h("p.muted", String(e?.message || e)));
+      slot.replaceChildren(h("p.muted", message(e)));
     }
   }
   const share = onServer

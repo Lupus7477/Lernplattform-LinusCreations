@@ -40,7 +40,7 @@ export async function render() {
   );
 
   async function lobby() {
-    if (document.querySelector(".lesson")) return; // Battle läuft darüber: die Lobby darunter sieht niemand
+    if (document.hidden || document.querySelector(".lesson")) return; // Tab im Hintergrund oder Battle darüber: sieht niemand
     const l = await call("battle_lobby").catch(() => null);
     if (!l) return;
     active.replaceChildren(
