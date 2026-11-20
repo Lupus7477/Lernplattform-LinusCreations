@@ -20,6 +20,8 @@ FROM chef AS build
 COPY --from=plan /src/recipe.json .
 RUN cargo chef cook --release -p lernpfad-server --recipe-path recipe.json
 COPY . .
+# Erst die Tests: Schlägt einer fehl, bricht der Build ab, und auf dem Server läuft die alte Version weiter
+RUN cargo test --release -p lernpfad-core -p lernpfad-server
 RUN cargo build --release -p lernpfad-server
 
 FROM debian:trixie-slim
@@ -35,4 +37,7 @@ COPY web /app/web
 USER lernpfad
 VOLUME /data
 EXPOSE 8443
+# Der Port öffnet erst, wenn Datenbank und Migrationen bereit sind. `compose up --wait` (deploy.sh) wartet darauf.
+# Anderer Port per --bind? Dann in compose.override.yaml `healthcheck:` anpassen.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD ["bash", "-c", ": > /dev/tcp/127.0.0.1/8443"]
 ENTRYPOINT ["lernpfad-server", "--data", "/data", "--web", "/app/web"]

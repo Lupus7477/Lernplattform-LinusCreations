@@ -8,6 +8,10 @@ services:
     volumes:
       - lernpfad-data:/data
     restart: unless-stopped
+    logging:
+      options:  # Docker hält Logs sonst unbegrenzt
+        max-size: "10m"
+        max-file: "3"
     # Zeitzone für Streak, Tagesziel und Kalender (Standard im Image: Europe/Berlin)
     # environment:
     #   TZ: Europe/Vienna

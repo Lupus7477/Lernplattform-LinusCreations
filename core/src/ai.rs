@@ -17,6 +17,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::data::LlamaTokenData;
 use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use serde_json::{json, Value};
 
 /// Eine Modellstufe. URLs sind auf eine feste Hugging-Face-Revision gepinnt.
@@ -26,6 +27,8 @@ pub struct Tier {
     pub file: &'static str,
     pub url: &'static str,
     pub size: u64,
+    /// SHA-256 der Datei (von Hugging Face, „lfs.oid“ derselben Revision)
+    pub sha256: &'static str,
 }
 
 pub const TIERS: [Tier; 2] = [
@@ -35,6 +38,7 @@ pub const TIERS: [Tier; 2] = [
         file: "Qwen3.5-2B-Q4_K_M.gguf",
         url: "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf",
         size: 1_280_835_840,
+        sha256: "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
     },
     Tier {
         id: "ausgewogen",
@@ -42,6 +46,7 @@ pub const TIERS: [Tier; 2] = [
         file: "Qwen3.5-4B-Q4_K_M.gguf",
         url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
         size: 2_740_937_888,
+        sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
     },
 ];
 
@@ -233,7 +238,14 @@ impl Ai {
         }
         self.set_state(State::Downloading { done: have, total: t.size });
         if have < t.size {
-            let resp = ureq::get(t.url)
+            // Ohne Timeouts hängt ein abgerissener Download für immer, und `downloading` bleibt bis zum Neustart gesetzt
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .timeout_connect(Some(Duration::from_secs(15)))
+                .timeout_per_read(Some(Duration::from_secs(60)))
+                .build()
+                .into();
+            let resp = agent
+                .get(t.url)
                 .header("Range", &format!("bytes={have}-"))
                 .call()
                 .map_err(|e| e.to_string())?;
@@ -267,6 +279,13 @@ impl Ai {
         }
         if have != t.size {
             return Err(format!("unvollständig ({have} von {} Bytes)", t.size));
+        }
+        // Erst prüfen, dann umbenennen: Eine kaputte oder fremde Datei gleicher Länge wird nie geladen
+        let mut hash = Sha256::new();
+        std::io::copy(&mut fs::File::open(&part).map_err(|e| e.to_string())?, &mut hash).map_err(|e| e.to_string())?;
+        if format!("{:x}", hash.finalize()) != t.sha256 {
+            fs::remove_file(&part).ok();
+            return Err("Die Datei ist beschädigt angekommen und wurde verworfen. Bitte noch einmal versuchen.".into());
         }
         fs::rename(&part, self.path(t)).map_err(|e| e.to_string())?;
         // Modelle der anderen Stufen brauchen nur Platz (1–3 GB)
