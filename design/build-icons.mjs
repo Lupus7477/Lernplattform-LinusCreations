@@ -4,9 +4,10 @@
 // (export, format svg, range "1-46"), dann:
 //   node design/build-icons.mjs <exportordner>
 //
-// Konvention im VectorCraft-Dokument: Flächen mit Farbe werden beim Hover gefüllt,
-// Linien mit fill="none" bleiben Linien. Farbe, Strichstärke und Enden kommen aus
-// dem CSS (.icon in web/css/app.css), darum fliegen sie hier raus.
+// Konvention im VectorCraft-Dokument („Glanz-Sticker“), erkannt an der Kontur:
+//   - Farbfläche: Füllung, keine Kontur. Im Ruhezustand zart getönt, aktiv/Hover satt (Farbe aus dem CSS).
+//   - Linie: Kontur, fill="none". Farbe, Stärke und Enden kommen aus dem CSS (.icon in web/css/app.css).
+//   - Glanzlicht: weiße Kontur. Nur sichtbar, wenn das Icon gefüllt ist (--icon-shine im CSS).
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -18,12 +19,16 @@ const symbols = files.map((f) => {
   const svg = readFileSync(join(dir, f), "utf8");
   const name = svg.match(/<title>([^<]+)<\/title>/)?.[1]; // Artboard-Name
   const viewBox = svg.match(/viewBox="([^"]+)"/)?.[1];
-  const shapes = (svg.match(/<(path|circle|ellipse|rect|line|polyline|polygon)\b[^>]*\/>/g) || []).map((el) =>
-    el
+  const shapes = (svg.match(/<(path|circle|ellipse|rect|line|polyline|polygon)\b[^>]*\/>/g) || []).map((el) => {
+    const stroke = el.match(/\sstroke="([^"]*)"/)?.[1] ?? "none";
+    const out = el
       .replace(/\s(id|data-name|style|stroke|stroke-[a-z]+|opacity)="[^"]*"/g, "")
       .replace(/\sfill="(?!none")[^"]*"/g, "")
-      .replace(/\s*\/>$/, "/>"),
-  );
+      .replace(/\s*\/>$/, "");
+    if (stroke === "none") return `${out} stroke="none"/>`; // Farbfläche
+    if (/^#f{3}(f{3})?$/i.test(stroke)) return `${out} style="stroke:var(--icon-shine,none);stroke-width:1.5"/>`; // Glanzlicht
+    return `${out}/>`; // Linie
+  });
   if (!name || !viewBox || !shapes.length) throw new Error(`${f}: kein Titel, viewBox oder keine Form`);
   return `<symbol id="i-${name}" viewBox="${viewBox}">${shapes.join("")}</symbol>`;
 });

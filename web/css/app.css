@@ -183,8 +183,9 @@ button {
   outline-offset: 3px;
   border-radius: 6px;
 }
-/* Eigene Icons (web/icons.svg, Quelle design/icons.vectorcraft): Outline im Ruhezustand,
-   beim Hover füllen sich die Flächen und die Kontur wird dunkel. fill/stroke erben in <use> hinein. */
+/* Eigene Icons (web/icons.svg, Quelle design/icons.vectorcraft): Im Ruhezustand liegt eine zart getönte Fläche
+   unter der Linie, beim Hover/aktiv wird sie satt, die Kontur dunkel und ein Glanzlicht erscheint.
+   fill/stroke und --icon-shine erben in <use> hinein. */
 .icon {
   width: 1.25em;
   height: 1.25em;
@@ -199,6 +200,12 @@ button {
     fill 150ms var(--ease-out),
     stroke 150ms var(--ease-out);
 }
+/* Getönte Fläche nur, wo color-mix geht: Mit var() darin fiele sie sonst auf Schwarz zurück (ältere WebViews) */
+@supports (fill: color-mix(in srgb, red 28%, transparent)) {
+  .icon {
+    fill: color-mix(in srgb, var(--icon-fill, var(--royal)) 28%, transparent);
+  }
+}
 /* Dauerhaft gefüllt: früher „…-fill“ (markiert), verdiente Erfolge und der aktive Tab, denn Handys haben kein Hover */
 .icon.filled,
 .badge .icon,
@@ -206,11 +213,13 @@ button {
 .tab[aria-current="page"] .icon {
   fill: var(--icon-fill, var(--royal));
   stroke: var(--ink);
+  --icon-shine: rgb(255 255 255 / 0.85);
 }
 @media (hover: hover) and (pointer: fine) {
   :is(a, button, summary, label):not(:disabled):hover .icon {
     fill: var(--icon-fill, var(--royal));
     stroke: var(--ink);
+    --icon-shine: rgb(255 255 255 / 0.85);
   }
 }
 .i-fire {

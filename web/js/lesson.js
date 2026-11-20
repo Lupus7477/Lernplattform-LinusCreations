@@ -763,11 +763,13 @@ export function openLesson({ unitId = null, wrongCourse = null, examCourse = nul
     foot.hidden = false;
     combo.classList.add("hide");
     // Level-Balken füllt sich von „vor der Lektion“ auf „jetzt“ (nach einem Level-Up von 0)
-    const lvlFill = h("i", { style: { "--p": String(res.level_up ? 0 : Math.max(0, s.level_xp - res.xp) / s.level_need) } });
+    const lvlFill = h("i", { style: { "--p": String(res.level_up ? 0 : Math.max(0, s.level_xp - (res.course_xp ?? res.xp)) / s.level_need) } });
     const level = h(
       "div.level-bar",
       h("div.level-head", h("b", `Level ${s.level} · ${s.title}`), h("span.num", `${s.level_xp} / ${s.level_need} XP`)),
       h("div.bar", { role: "progressbar", "aria-label": `Level ${s.level}`, "aria-valuemin": "0", "aria-valuemax": String(s.level_need), "aria-valuenow": String(s.level_xp) }, lvlFill),
+      // Wiederholung über mehrere Kurse: Das Level zeigt nur den Anteil dieses Kurses
+      res.course_xp < res.xp ? h("p.hint.num", `${res.xp - res.course_xp} XP davon zählen in anderen Kursen.`) : null,
     );
     const was = res.before ? Math.round((res.before.correct / Math.max(1, res.before.total)) * 100) : null;
     body.replaceChildren(

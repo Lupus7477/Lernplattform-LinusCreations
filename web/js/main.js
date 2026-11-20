@@ -129,7 +129,12 @@ function renderTopbar() {
     courseEl,
     h("span.spacer"),
     h("span.chip.streak" + (s.streak ? "" : ".off"), { "aria-label": `Streak: ${s.streak} ${s.streak === 1 ? "Tag" : "Tage"}` }, icon("fire-fill"), h("span.num", String(s.streak))),
-    h("span.chip", { "aria-label": `Heute ${s.xp_today} von ${s.goal} XP` }, h("span.ring", { style: { "--p": String(p) } }), h("span.num", `${s.xp_today} XP`)),
+    h(
+      "span.chip",
+      { "aria-label": `Heute ${s.xp_today} von ${s.goal} XP`, title: `Tagesziel: heute ${s.xp_today} von ${s.goal} XP über alle Kurse, beginnt um 0 Uhr neu` },
+      h("span.ring", { style: { "--p": String(p) } }),
+      h("span.num", `${s.xp_today}/${s.goal} XP`),
+    ),
   );
 }
 

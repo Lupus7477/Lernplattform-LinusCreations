@@ -1346,6 +1346,8 @@ struct NextUnit {
 #[derive(Serialize)]
 struct Finished {
     xp: i64,
+    /// Anteil davon im Kurs, dessen Level in `stats` steht (Wiederholung über mehrere Kurse: weniger als `xp`)
+    course_xp: i64,
     /// Erstantworten dieser Lektion, vom Server gezählt (Zuordnen-Runde als eine Aufgabe)
     correct: i64,
     total: i64,
@@ -1424,6 +1426,11 @@ fn finish_lesson(c: &Core, who: &Who, unit_id: Option<i64>, course_id: Option<i6
         None => None,
     };
     let xp = if total > 0 { learn::lesson_xp(correct, total, !partial) } else { 0 };
+    // Hauptzeile = parts[0] (bei total > 0 gibt es sie); ohne Kurs zählt das Level alle XP
+    let course_xp = match parts.first() {
+        Some(p) if total > 0 && names.course.is_some() => xp - 2 * (correct - p.correct),
+        _ => xp,
+    };
     if total > 0 {
         for (i, p) in parts.iter().enumerate() {
             // Hauptzeile: ihr Anteil plus Bonus (= alles, was die anderen Kurse nicht bekommen)
@@ -1444,7 +1451,7 @@ fn finish_lesson(c: &Core, who: &Who, unit_id: Option<i64>, course_id: Option<i6
     }
     let level_up = stats.level > prev.level;
     if partial || total == 0 {
-        return Ok(Finished { xp, correct, total, stats, level_up, badges: vec![], before, next: None, cheer: String::new() });
+        return Ok(Finished { xp, course_xp, correct, total, stats, level_up, badges: vec![], before, next: None, cheer: String::new() });
     }
 
     // Serien-Erfolge einmal, Kurs-Erfolge in jedem Kurs, in dem diese Lektion gezählt hat
@@ -1493,7 +1500,7 @@ fn finish_lesson(c: &Core, who: &Who, unit_id: Option<i64>, course_id: Option<i6
         Some(cid) => recommend(&conn, who, cid, unit_id)?,
         None => None,
     };
-    Ok(Finished { xp, correct, total, stats, level_up, badges, before, next, cheer })
+    Ok(Finished { xp, course_xp, correct, total, stats, level_up, badges, before, next, cheer })
 }
 
 /// Was der Code für die Kurs-Erfolge über einen Kurs weiß (Serien-Erfolge kommen getrennt). `best_run` = aus dieser Lektion.
@@ -2927,6 +2934,8 @@ mod tests {
         // Insgesamt einmal: 2 × 4 richtige + 5 fürs Abschließen, eine Lektion
         assert_eq!((fin["xp"].as_i64(), fin["correct"].as_i64(), fin["total"].as_i64()), (Some(13), Some(4), Some(5)));
         assert_eq!((fin["stats"]["total_xp"].as_i64(), fin["stats"]["lessons"].as_i64()), (Some(13), Some(1)));
+        // Abschlussseite zeigt das Level von Mikro: nur dessen Anteil, nicht alle 13
+        assert_eq!(fin["course_xp"].as_i64(), Some(11));
         // Im Kurs: Mikro (Hauptkurs, meiste Antworten) 3 × 2 + 5, Recht 1 × 2
         let level_xp = |id: i64| run(&c, &crate::LOCAL, "stats", json!({ "courseId": id })).unwrap()["level_xp"].as_i64().unwrap();
         assert_eq!((level_xp(course), level_xp(11)), (11, 2));

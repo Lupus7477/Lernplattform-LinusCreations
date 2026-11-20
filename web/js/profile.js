@@ -67,7 +67,7 @@ function content(s, tiers, server, badges, course) {
     ),
     h("div.card", h("h2", "Letzte 6 Wochen"), calendar(s.active_days, s.frozen_days)),
     badges.length ? badgeCard(badges, course) : null,
-    h("div.card", h("h2", "Diese Woche"), week(s.week, s.goal)),
+    h("div.card", h("h2", "Letzte 7 Tage"), week(s.week, s.goal)),
     settings(s),
     ...server.filter(Boolean),
     aiCard(tiers),
@@ -135,7 +135,7 @@ function week(days, goal) {
   return h(
     "div",
     h("div.week", { role: "img", "aria-label": `XP der letzten 7 Tage: ${days.map((d) => d.xp).join(", ")}. Tagesziel ${goal} XP.` }, cols, h("span.goal", { style: { bottom: `${24 + 4 + (goal / max) * 100}px` } })),
-    h("p.muted", { style: { "margin-top": "10px" } }, `Gestrichelte Linie: dein Tagesziel von ${goal} XP.`),
+    h("p.muted", { style: { "margin-top": "10px" } }, `XP über alle Kurse, gestrichelt dein Tagesziel von ${goal} XP. Die Tages-XP oben rechts beginnen jeden Tag um 0 Uhr neu, Gesamt-XP und Level bleiben.`),
   );
 }
 
